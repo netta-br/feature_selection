@@ -7,6 +7,8 @@ def train_test_val_split(df: pd.DataFrame, random_seed:int, train_pcnt:float=0.7
     train_size = int(n_samples * train_pcnt)
     val_size = int(n_samples * val_pct)
     test_size = n_samples - train_size - val_size
+    if test_size < 0:
+        raise ValueError("train and validation percents exceeds 100%")
     dataset_column_idx = df_copy.columns.get_loc('dataset')
     train_idx = df_copy.sample(n=train_size, random_state=random_seed).index
     df_copy.iloc[train_idx, dataset_column_idx] = 'Train'
