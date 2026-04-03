@@ -1,353 +1,471 @@
-import pandas as pd
-import numpy as np
-from sklearn.feature_selection import mutual_info_classif, mutual_info_regression, f_classif, f_regression
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-import os # Import os for file path checks
-from ..evaluation.logistic_regression import evaluate_logistic_regression_with_given_features
+from __future__ import annotations
 
+import logging
+import os
+import sys
+from dataclasses import dataclass
+from time import perf_counter
+
+import numpy as np
+import pandas as pd
+
+from ..evaluation.logistic_regression import evaluate_logistic_regression_with_given_features
+from ..precomputation import FeatureCorrelationMatrix
+
+# ---------------------------------------------------------------------------
+# Module-level logger (duplicate-handler guard)
+# ---------------------------------------------------------------------------
+logger = logging.getLogger("mRmRSelector")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    logger.addHandler(_h)
+
+
+# ---------------------------------------------------------------------------
+# SelectionResult dataclass
+# ---------------------------------------------------------------------------
+@dataclass
+class SelectionResult:
+    """Holds the output of a completed :py:meth:`mRmRSelector.forward_selection` run."""
+
+    selected_features: list[str]
+    performance_history: list[dict]        # one dict per step where evaluation ran
+    stopping_reason: str                   # "max_features_reached" | "metric_threshold_reached" | "no_features_remaining"
+    n_steps: int
+    final_metrics: dict | None             # last entry of performance_history, or None
+    selection_time_seconds: float          # lazy on-demand compute time only
+    evaluation_time_seconds: float | None  # None if evaluation not performed
+
+    def __str__(self) -> str:
+        lines = [
+            "SelectionResult:",
+            f"  features selected : {self.n_steps}",
+            f"  stopping reason   : {self.stopping_reason}",
+            f"  selection time    : {self.selection_time_seconds:.3f}s",
+        ]
+        if self.evaluation_time_seconds is not None:
+            lines.append(f"  evaluation time   : {self.evaluation_time_seconds:.3f}s")
+        if self.final_metrics is not None:
+            acc = self.final_metrics.get("accuracy", "n/a")
+            f1 = (
+                self.final_metrics.get("macro avg", {}).get("f1-score", "n/a")
+                if isinstance(self.final_metrics.get("macro avg"), dict)
+                else "n/a"
+            )
+            lines.append(f"  final accuracy    : {acc}")
+            lines.append(f"  final macro F1    : {f1}")
+        lines.append(f"  features          : {self.selected_features}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# mRmRSelector
+# ---------------------------------------------------------------------------
 class mRmRSelector:
     """
-    A class for selecting features using the Minimum Redundancy Maximum Relevance (mRmR) algorithm.
-    """
-    def __init__(self, X: pd.DataFrame, y: pd.Series,
-                 relevance_method: str,
-                 redundancy_method: str,
-                 mrmr_score_method: str,
-                 correlation_filepath: str = None,
-                 base_gene_expression_df: pd.DataFrame = None, # Added for evaluation
-                 base_train_labels_df: pd.DataFrame = None,    # Added for evaluation
-                 base_val_labels_df: pd.DataFrame = None,      # Added for evaluation
-                 lr_C: float = np.inf):                       # Added for evaluation
+    Minimum Redundancy Maximum Relevance (mRmR) feature selector.
 
-        self.X = X
-        self.y = y
+    Supports three correlation-based relevance methods (``'pearson'``,
+    ``'kendall'``, ``'spearman'``).  Redundancy is the **mean** absolute
+    pairwise correlation between a candidate and the already-selected set,
+    computed with the **same** method used for relevance.
+
+    The internal score matrix stores both feature-feature and
+    feature-target scores under the actual column names from the loaded
+    matrix (or ``y_train.name`` for the target).  No sentinel rename of
+    ``__target__`` is applied — the target column is always addressed by
+    ``y_train.name``.
+
+    Parameters
+    ----------
+    X_train : pd.DataFrame
+        Training feature matrix.  NaNs are imputed with 0 internally.
+    y_train : pd.Series
+        Training target vector.  **Must have a ``.name`` attribute** that
+        identifies the target column (e.g. ``'is_lumA'`` or ``'Lympho'``).
+    relevance_method : str
+        Correlation method for both relevance and redundancy.
+        One of ``'pearson'`` (default), ``'kendall'``, ``'spearman'``.
+    mrmr_score_method : str
+        How to combine relevance and redundancy.
+        ``'difference'`` (default) or ``'ratio'``.
+    correlation_filepath : str | None
+        Path to a pre-computed correlation matrix CSV that **includes** the
+        target column under ``y_train.name``.  If the file does not exist it
+        will be computed (features + target) and saved here.  ``None``
+        activates lazy on-demand scoring.
+    gene_expression_df, train_labels_df, val_labels_df : pd.DataFrame | None
+        Domain-specific data forwarded to the LR evaluation helper.
+        Evaluation is skipped if any of the three is ``None``.
+    lr_C : float
+        Regularisation parameter forwarded to the LR helper.
+    random_seed : int | None
+        Forwarded to the LR helper for reproducibility.
+    """
+
+    def __init__(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        relevance_method: str = "pearson",
+        mrmr_score_method: str = "difference",
+        correlation_filepath: str | None = None,
+        # --- evaluation params (P0: domain-specific) ---
+        gene_expression_df: pd.DataFrame | None = None,
+        train_labels_df: pd.DataFrame | None = None,
+        val_labels_df: pd.DataFrame | None = None,
+        lr_C: float = np.inf,
+        random_seed: int | None = None,
+    ) -> None:
+        _valid_methods = {"pearson", "kendall", "spearman"}
+        if relevance_method not in _valid_methods:
+            raise ValueError(
+                f"relevance_method must be one of {_valid_methods}; got {relevance_method!r}"
+            )
+        if mrmr_score_method not in {"difference", "ratio"}:
+            raise ValueError(
+                "mrmr_score_method must be 'difference' or 'ratio'; "
+                f"got {mrmr_score_method!r}"
+            )
+        if y_train.name is None:
+            raise ValueError(
+                "y_train must have a .name (e.g. pd.Series(..., name='is_lumA')). "
+                "The name is used to locate the target column in the score matrix."
+            )
+
+        self.X_train = X_train
+        self.y_train = y_train
         self.relevance_method = relevance_method
-        self.redundancy_method = redundancy_method
         self.mrmr_score_method = mrmr_score_method
         self.correlation_filepath = correlation_filepath
 
-        self.base_gene_expression_df = base_gene_expression_df
-        self.base_train_labels_df = base_train_labels_df
-        self.base_val_labels_df = base_val_labels_df
+        self.gene_expression_df = gene_expression_df
+        self.train_labels_df = train_labels_df
+        self.val_labels_df = val_labels_df
         self.lr_C = lr_C
+        self.random_seed = random_seed
 
-        self.selected_features = []
-        self.unselected_features = list(X.columns)
-        self._correlation_matrix = None
-        self._relevance_scores = None
-        self.performance_history = [] # To store evaluation metrics
+        # NaN imputation — done once, reused everywhere
+        self._X_filled: pd.DataFrame = X_train.fillna(0)
 
-    def _is_target_categorical(self) -> bool:
-        """Determines if the target variable is categorical (for classification) or continuous (for regression)."""
-        # A common heuristic: if y has fewer than 10% unique values, treat as categorical
-        return self.y.nunique() < 0.1 * len(self.y)
+        # Target column name — always y_train.name, never a synthetic sentinel
+        self._target_col: str = str(y_train.name)
 
-    def _calculate_absolute_correlation(self, X_feature: pd.Series, y: pd.Series) -> float:
-        """
-        Calculates the absolute Pearson correlation between a single feature and the target.
-        """
-        # Ensure that X_feature and y are aligned by index
-        common_index = X_feature.index.intersection(y.index)
-        if common_index.empty:
-            return 0.0 # No common samples, no correlation
+        self._task_type: str = self._detect_task_type()
 
-        X_feature_aligned = X_feature.loc[common_index]
-        y_aligned = y.loc[common_index]
+        # Score matrix — None until _precompute_matrix or first _get_score call
+        self._score_matrix: pd.DataFrame | None = None
 
-        # Handle cases where correlation might be undefined (e.g., constant feature)
-        if X_feature_aligned.std() == 0 or y_aligned.std() == 0:
+        logger.info(
+            "mRmRSelector initialised | task_type=%s | target_col=%s | "
+            "relevance_method=%s | mrmr_score_method=%s",
+            self._task_type,
+            self._target_col,
+            self.relevance_method,
+            self.mrmr_score_method,
+        )
+
+    # ------------------------------------------------------------------
+    # §5.2  Task-type detection
+    # ------------------------------------------------------------------
+    def _detect_task_type(self) -> str:
+        if self.y_train.nunique() < 0.1 * len(self.y_train):
+            return "classification"
+        return "regression"
+
+    # ------------------------------------------------------------------
+    # §5.3  Precomputation (Mode A — correlation_filepath provided)
+    # ------------------------------------------------------------------
+    def _precompute_matrix(self) -> None:
+        if self.correlation_filepath is None:
+            self._score_matrix = None
+            logger.info("No correlation filepath — lazy on-demand scoring active")
+            return
+
+        fcm = FeatureCorrelationMatrix()
+
+        if os.path.exists(self.correlation_filepath):
+            fcm.load_correlation_matrix(self.correlation_filepath)
+            self._score_matrix = fcm.correlation_matrix.abs()
+            logger.info(
+                "Loaded correlation matrix from %s %s",
+                self.correlation_filepath,
+                self._score_matrix.shape,
+            )
+        else:
+            combined = pd.concat(
+                [self._X_filled, self.y_train], axis=1
+            )
+            FeatureCorrelationMatrix.compute_correlation_matrix(
+                combined,
+                method=self.relevance_method,
+                filepath=self.correlation_filepath,
+            )
+            fcm.load_correlation_matrix(self.correlation_filepath)
+            self._score_matrix = fcm.correlation_matrix.abs()
+            logger.info(
+                "Computed and saved correlation matrix to %s %s",
+                self.correlation_filepath,
+                self._score_matrix.shape,
+            )
+
+        # Warn if the target column is missing; fill lazily
+        if self._target_col not in self._score_matrix.columns:
+            logger.warning(
+                "Target column '%s' absent in loaded matrix — target relevance "
+                "will be computed lazily",
+                self._target_col,
+            )
+            self._score_matrix[self._target_col] = np.nan
+            self._score_matrix.loc[self._target_col] = np.nan
+
+    # ------------------------------------------------------------------
+    # §5.4  Unified score access
+    # ------------------------------------------------------------------
+    def _lazy_init_matrix(self) -> None:
+        """Initialise the score matrix to NaN on first Mode-B access."""
+        cols = list(self._X_filled.columns) + [self._target_col]
+        self._score_matrix = pd.DataFrame(np.nan, index=cols, columns=cols, dtype=float)
+        np.fill_diagonal(self._score_matrix.values, 1.0)
+
+    def _compute_raw_score(self, col_a: str, col_b: str) -> float:
+        """Compute absolute correlation between two columns (or target)."""
+        series_a = (
+            self.y_train if col_a == self._target_col else self._X_filled[col_a]
+        )
+        series_b = (
+            self.y_train if col_b == self._target_col else self._X_filled[col_b]
+        )
+        if series_a.std() == 0 or series_b.std() == 0:
             return 0.0
+        r = series_a.corr(series_b, method=self.relevance_method)
+        return 0.0 if pd.isna(r) else abs(r)
 
-        # Pearson correlation
-        correlation = X_feature_aligned.corr(y_aligned, method='pearson')
-        return abs(correlation) if not pd.isna(correlation) else 0.0
+    def _get_score(self, col_a: str, col_b: str) -> float:
+        """Return cached absolute correlation; compute and cache on miss."""
+        # Lazy init (Mode B)
+        if self._score_matrix is None:
+            self._lazy_init_matrix()
 
-    def _calculate_f_statistic(self, X_feature: pd.DataFrame, y: pd.Series) -> float:
-        """
-        Calculates the F-statistic between a single feature and the target.
-        Adapts for classification or regression based on the target variable.
-        """
-        # Ensure that X_feature and y are aligned by index
-        common_index = X_feature.index.intersection(y.index)
-        if common_index.empty:
-            return 0.0 # No common samples, no F-statistic
+        # Bounds-check — warn and compute live rather than KeyError
+        if col_a not in self._score_matrix.index or col_b not in self._score_matrix.columns:
+            logger.warning(
+                "Feature not found in score matrix: ('%s', '%s') — computing live",
+                col_a,
+                col_b,
+            )
+            return self._compute_raw_score(col_a, col_b)
 
-        X_feature_aligned = X_feature.loc[common_index]
-        y_aligned = y.loc[common_index]
+        val = self._score_matrix.loc[col_a, col_b]
+        if not pd.isna(val):
+            return float(val)
 
-        if self._is_target_categorical():
-            # For classification tasks
-            f_stat, _ = f_classif(X_feature_aligned, y_aligned)
-        else:
-            # For regression tasks
-            f_stat, _ = f_regression(X_feature_aligned, y_aligned)
-        return f_stat[0] # f_classif/f_regression return (array of scores, array of p-values)
+        raw = self._compute_raw_score(col_a, col_b)
+        self._score_matrix.loc[col_a, col_b] = raw
+        self._score_matrix.loc[col_b, col_a] = raw
+        return raw
 
-    def _calculate_mutual_information(self, X_feature: pd.Series, y: pd.Series) -> float:
-        """
-        Calculates mutual information between a feature and the target.
-        Adapts for classification or regression based on the target variable.
-        """
-        # Ensure that X_feature and y are aligned by index
-        common_index = X_feature.index.intersection(y.index)
-        if common_index.empty:
-            return 0.0 # No common samples, no mutual information
-
-        X_feature_2d = X_feature.loc[common_index].values.reshape(-1, 1)
-        y_aligned = y.loc[common_index]
-
-        if self._is_target_categorical():
-            # For classification tasks
-            mi_score = mutual_info_classif(X_feature_2d, y_aligned, random_state=42)[0]
-        else:
-            # For regression tasks
-            mi_score = mutual_info_regression(X_feature_2d, y_aligned, random_state=42)[0]
-        return mi_score
-
-    def _calculate_random_forest_importance(self, X_data: pd.DataFrame, y_data: pd.Series) -> pd.Series:
-        """
-        Calculates feature importances using a RandomForest model.
-        Adapts for classification or regression based on the target variable.
-        """
-        if self._is_target_categorical():
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-        else:
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-
-        model.fit(X_data, y_data)
-        return pd.Series(model.feature_importances_, index=X_data.columns)
-
-    def _precompute_measures(self):
-        """
-        Precomputes the feature-feature correlation matrix and feature-target relevance scores.
-        """
-        # Ensure no NaN values in self.X before computing correlation or relevance
-        X_filled = self.X.fillna(0)
-
-        # --- Precompute Correlation Matrix ---
-        if self.correlation_filepath and os.path.exists(self.correlation_filepath):
-            print(f"Loading correlation matrix from {self.correlation_filepath}...")
-            try:
-                self._correlation_matrix = pd.read_csv(self.correlation_filepath, index_col=0)
-                print("Correlation matrix loaded.")
-            except Exception as e:
-                print(f"Error loading correlation matrix: {e}. Recomputing.")
-                self._correlation_matrix = None # Set to None to trigger recomputation
-
-        if self._correlation_matrix is None: # If not loaded or error, compute
-            print("Precomputing feature-feature correlation matrix...")
-            self._correlation_matrix = X_filled.corr(method='pearson')
-            if self.correlation_filepath:
-                self._correlation_matrix.to_csv(self.correlation_filepath)
-                print(f"Correlation matrix saved to {self.correlation_filepath}")
-            else:
-                print("Correlation matrix computed (not saved as no filepath provided).")
-
-        # --- Precompute Feature-Target Relevance Scores ---
-        print(f"Precomputing feature-target relevance scores using '{self.relevance_method}'...")
-        if self.relevance_method == 'rf_importance':
-            # RandomForest importance needs all features at once
-            self._relevance_scores = self._calculate_random_forest_importance(X_filled, self.y)
-        else:
-            self._relevance_scores = pd.Series(dtype=float)
-            for feature in X_filled.columns:
-                if self.relevance_method == 'correlation':
-                    relevance = self._calculate_absolute_correlation(X_filled[feature], self.y)
-                elif self.relevance_method == 'f_statistic':
-                    # F-stat expects 2D array, so pass a DataFrame with a single column
-                    relevance = self._calculate_f_statistic(X_filled[[feature]], self.y)
-                elif self.relevance_method == 'mutual_info':
-                    relevance = self._calculate_mutual_information(X_filled[feature], self.y)
-                else:
-                    raise ValueError(f"Unknown relevance method: {self.relevance_method}")
-                self._relevance_scores.loc[feature] = relevance
-
-        print("Relevance scores precomputation complete.")
-        print("Precomputation complete.")
-
-
+    # ------------------------------------------------------------------
+    # §5.5  Relevance
+    # ------------------------------------------------------------------
     def _get_relevance(self, feature: str) -> float:
-        """
-        Retrieves the precomputed relevance score for a given feature.
-        """
-        if self._relevance_scores is None:
-            raise ValueError("Relevance scores have not been precomputed. Call _precompute_measures first.")
-        # Handle cases where feature might not be in relevance scores (e.g., if X_filled changed or specific feature dropped)
-        return self._relevance_scores.get(feature, 0.0) # Return 0 if feature not found
+        return self._get_score(feature, self._target_col)
 
-    def _get_redundancy(self, candidate_feature: str, selected_features_list: list) -> float:
-        """
-        Computes the L1 norm of the redundancy between a candidate feature
-        and the currently selected features.
-        """
-        if self.redundancy_method != 'l1_correlation':
-            raise ValueError(f"Unknown redundancy method: {self.redundancy_method}. Only 'l1_correlation' is implemented.")
-
-        if not selected_features_list:
+    # ------------------------------------------------------------------
+    # §5.6  Redundancy — vectorised
+    # ------------------------------------------------------------------
+    def _get_redundancy(self, candidate: str, selected: list[str]) -> float:
+        if not selected:
             return 0.0
+        # Populate any cache misses
+        for s in selected:
+            self._get_score(candidate, s)
+        return float(self._score_matrix.loc[candidate, selected].mean())
 
-        if self._correlation_matrix is None:
-            raise ValueError("Correlation matrix has not been precomputed. Call _precompute_measures first.")
-
-        redundancy_values = []
-        for s_feature in selected_features_list:
-            # Check if both features exist in the correlation matrix
-            if candidate_feature in self._correlation_matrix.columns and \
-               s_feature in self._correlation_matrix.columns:
-                correlation = self._correlation_matrix.loc[candidate_feature, s_feature]
-                redundancy_values.append(abs(correlation))
-            else:
-                # Handle cases where a feature might be missing from the correlation matrix
-                print(f"Warning: Feature '{candidate_feature}' or '{s_feature}' not found in correlation matrix. Assuming 0 redundancy.")
-                redundancy_values.append(0.0) # Assume no redundancy if missing
-
-        return sum(redundancy_values)
-
+    # ------------------------------------------------------------------
+    # §5.7  mRmR score
+    # ------------------------------------------------------------------
     def _compute_mrmr_score(self, relevance: float, redundancy: float) -> float:
-        """
-        Combines relevance and redundancy into an mRmR score.
-        """
-        if self.mrmr_score_method == 'difference':
+        if self.mrmr_score_method == "difference":
             return relevance - redundancy
-        elif self.mrmr_score_method == 'ratio':
-            return relevance / (redundancy + 1e-8) # Add small epsilon to prevent division by zero
-        else:
-            raise ValueError("mRmR score method must be 'difference' or 'ratio'.")
+        # ratio
+        return relevance / (redundancy + 1e-8)
 
-    def perform_greedy_mrmr_step(self) -> str:
-        """
-        Identifies and selects the unselected feature with the highest mRmR score.
-        Returns the selected feature name, or None if no features left to select.
-        """
-        if not self.unselected_features:
-            return None
-
-        best_feature = None
-        max_mrmr_score = -np.inf
-
-        for candidate_feature in self.unselected_features:
-            relevance = self._get_relevance(candidate_feature)
-            redundancy = self._get_redundancy(candidate_feature, self.selected_features)
-            mrmr_score = self._compute_mrmr_score(relevance, redundancy)
-
-            if mrmr_score > max_mrmr_score:
-                max_mrmr_score = mrmr_score
-                best_feature = candidate_feature
-
-        if best_feature is not None:
-            self.selected_features.append(best_feature)
-            self.unselected_features.remove(best_feature)
-            return best_feature
-        else:
-            return None
-
-    def _evaluate_current_selection(self, random_seed: int = None) -> dict:
-        """
-        Evaluates the current set of selected features using Logistic Regression.
-        Requires base_gene_expression_df, base_train_labels_df, base_val_labels_df, and lr_C
-        to be set during initialization.
-        """
-        if not self.selected_features:
-            return {"accuracy": 0.0, "macro avg": {"precision": 0.0, "recall": 0.0, "f1-score": 0.0}}
-
-        if self.base_gene_expression_df is None or \
-           self.base_train_labels_df is None or \
-           self.base_val_labels_df is None:
-            raise ValueError("Evaluation data (base_gene_expression_df, base_train_labels_df, base_val_labels_df) must be provided in __init__ for evaluation.")
-
+    # ------------------------------------------------------------------
+    # §5.8  Evaluation step
+    # ------------------------------------------------------------------
+    def _evaluate_step(self, selected_features: list[str]) -> dict:
         _, report = evaluate_logistic_regression_with_given_features(
-            gene_expression_df=self.base_gene_expression_df,
-            train_labels_df=self.base_train_labels_df,
-            val_labels_df=self.base_val_labels_df,
-            feature_list=self.selected_features,
-            random_seed=random_seed,
+            gene_expression_df=self.gene_expression_df,
+            train_labels_df=self.train_labels_df,
+            val_labels_df=self.val_labels_df,
+            feature_list=selected_features,
+            random_seed=self.random_seed,
             output_dict=True,
-            lr_C=self.lr_C
+            lr_C=self.lr_C,
         )
         return report
 
-    def forward_selection(self, n_features_to_select: int,
-                            stopping_metric: str = None,
-                            stopping_threshold: float = None,
-                            random_seed:int = None) -> tuple:
+    # ------------------------------------------------------------------
+    # §5.9  Forward selection
+    # ------------------------------------------------------------------
+    def forward_selection(
+        self,
+        n_features_to_select: int,
+        stopping_metric: str | None = None,
+        stopping_threshold: float | None = None,
+    ) -> SelectionResult:
         """
-        Orchestrates the greedy forward selection process to select a desired number of features.
-        Includes optional early stopping based on validation performance.
+        Greedy forward mRmR feature selection.
 
-        Args:
-            n_features_to_select (int): The maximum number of features to select.
-            stopping_metric (str, optional): The metric to monitor for early stopping (e.g., 'macro avg_f1-score', 'accuracy').
-                                             If None, no early stopping is performed.
-            stopping_threshold (float, optional): The threshold for the stopping_metric. If the metric
-                                                  reaches or exceeds this value, selection stops.
+        Parameters
+        ----------
+        n_features_to_select : int
+            Maximum number of features to select.
+        stopping_metric : str | None
+            Metric key from the classification report to monitor for early
+            stopping (e.g. ``'accuracy'`` or ``'macro avg_f1-score'``).
+            Ignored when evaluation data is not provided.
+        stopping_threshold : float | None
+            Stop early when *stopping_metric* ≥ *stopping_threshold*.
 
-        Returns:
-            tuple: A tuple containing:
-                   - list: The list of selected feature names.
-                   - list: A list of dictionaries, where each dictionary contains the evaluation
-                           metrics after each feature selection step.
+        Returns
+        -------
+        SelectionResult
         """
-        if n_features_to_select <= 0:
-            print("Number of features to select must be greater than 0.")
-            return [], []
+        # ── PRE-SELECTION (not timed) ──────────────────────────────────
+        self._precompute_matrix()
+        logger.info(
+            "Starting forward selection for up to %d features", n_features_to_select
+        )
 
-        # Ensure precomputation is done before starting selection
-        if self._relevance_scores is None or self._correlation_matrix is None:
-            self._precompute_measures()
+        # ── SELECTION LOOP ─────────────────────────────────────────────
+        selected: list[str] = []
+        unselected: list[str] = list(self.X_train.columns)
+        t_select: float = 0.0
+        t_eval: float = 0.0
+        stopping_reason: str | None = None
+        performance_history: list[dict] = []
 
-        print(f"Starting mRmR forward selection for {n_features_to_select} features...")
-        if stopping_metric and stopping_threshold is not None:
-            print(f"Early stopping enabled: monitoring '{stopping_metric}' with threshold >= {stopping_threshold:.4f}")
-        
-        self.performance_history = [] # Reset performance history for this run
+        _eval_enabled = (
+            self.gene_expression_df is not None
+            and self.train_labels_df is not None
+            and self.val_labels_df is not None
+        )
 
-        for i in range(n_features_to_select):
-            if not self.unselected_features:
-                print(f"All available features selected. Stopping at {len(self.selected_features)} features.")
+        for step in range(n_features_to_select):
+            # (a) All features already selected?
+            if not unselected:
+                stopping_reason = "no_features_remaining"
+                logger.info("No features remaining — stopping at step %d", step)
                 break
 
-            selected_feature = self.perform_greedy_mrmr_step()
-            if selected_feature:
-                print(f"Step {i+1}: Selected '{selected_feature}'. Total selected: {len(self.selected_features)}")
+            # (b) TIMED: mRmR scoring + best-feature selection
+            t0 = perf_counter()
+            scores = {
+                c: self._compute_mrmr_score(
+                    self._get_relevance(c),
+                    self._get_redundancy(c, selected),
+                )
+                for c in unselected
+            }
+            best = max(scores, key=scores.__getitem__)
+            selected.append(best)
+            unselected.remove(best)
+            t_select += perf_counter() - t0
 
-                # Evaluate current selection if evaluation data is provided
-                if self.base_gene_expression_df is not None:
-                    current_performance = self._evaluate_current_selection(random_seed=random_seed) 
-                    self.performance_history.append(current_performance)
+            logger.info(
+                "Step %d: selected '%s' (%d total)", step + 1, best, len(selected)
+            )
 
-                    macro_avg_f1 = current_performance['macro avg']['f1-score']
-                    accuracy = current_performance['accuracy']
-                    print(f"  Validation Performance - Accuracy: {accuracy:.4f}, Macro Avg F1: {macro_avg_f1:.4f}")
+            # (c) Evaluation (optional)
+            if _eval_enabled:
+                t0 = perf_counter()
+                metrics = self._evaluate_step(selected)
+                t_eval += perf_counter() - t0
+                performance_history.append(metrics)
 
-                    # Check for early stopping
-                    if stopping_metric and stopping_threshold is not None:
-                        if stopping_metric == 'accuracy':
-                            metric_value = accuracy
-                        elif stopping_metric == 'macro avg_f1-score':
-                            metric_value = macro_avg_f1
-                        else:
-                            # Attempt to get value from report directly
-                            try:
-                                # Example: 'True_f1-score' or 'False_precision'
-                                parts = stopping_metric.split('_')
-                                if len(parts) == 2: # e.g., 'macro avg_f1-score'
-                                    metric_value = current_performance[parts[0]][parts[1]]
-                                elif len(parts) == 1: # e.g., 'accuracy'
-                                    metric_value = current_performance[parts[0]]
-                                else:
-                                    raise KeyError # force generic error
-                            except KeyError:
-                                print(f"Warning: Unknown stopping_metric '{stopping_metric}'. Early stopping will not be applied.")
-                                metric_value = -np.inf # Effectively disable stopping
+                acc = metrics.get("accuracy", float("nan"))
+                f1 = (
+                    metrics.get("macro avg", {}).get("f1-score", float("nan"))
+                    if isinstance(metrics.get("macro avg"), dict)
+                    else float("nan")
+                )
+                logger.info(
+                    "Step %d eval — accuracy: %.4f  macro F1: %.4f",
+                    step + 1,
+                    acc,
+                    f1,
+                )
 
-                        if metric_value >= stopping_threshold:
-                            print(f"\nEarly stopping triggered at {len(self.selected_features)} features!")
-                            print(f"Metric '{stopping_metric}' reached {metric_value:.4f} (threshold: {stopping_threshold:.4f}).")
-                            break
-            else:
-                print(f"No more features to select after {len(self.selected_features)} steps.")
-                break
+                # Early stopping
+                if stopping_metric is not None and stopping_threshold is not None:
+                    metric_value = self._resolve_metric(metrics, stopping_metric)
+                    if metric_value >= stopping_threshold:
+                        stopping_reason = "metric_threshold_reached"
+                        logger.info(
+                            "Early stopping: %s=%.4f >= threshold=%.4f",
+                            stopping_metric,
+                            metric_value,
+                            stopping_threshold,
+                        )
+                        break
 
-        print("\nmRmR feature selection complete.")
-        print("Final selected features count:", len(self.selected_features))
-        return self.selected_features, self.performance_history
+        if stopping_reason is None:
+            stopping_reason = "max_features_reached"
+
+        # ── POST-SELECTION (not timed) ─────────────────────────────────
+        logger.info(
+            "Selection complete: %d features, reason=%s",
+            len(selected),
+            stopping_reason,
+        )
+        logger.info("Selection time: %.3fs", t_select)
+        if _eval_enabled:
+            logger.info("Evaluation time: %.3fs", t_eval)
+
+        return SelectionResult(
+            selected_features=selected,
+            performance_history=performance_history,
+            stopping_reason=stopping_reason,
+            n_steps=len(selected),
+            final_metrics=performance_history[-1] if performance_history else None,
+            selection_time_seconds=t_select,
+            evaluation_time_seconds=t_eval if _eval_enabled else None,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_metric(report: dict, metric_key: str) -> float:
+        """
+        Resolve a dotted metric key from a classification_report dict.
+
+        Supported formats
+        -----------------
+        * ``'accuracy'``
+        * ``'macro avg_f1-score'``  →  ``report['macro avg']['f1-score']``
+        * any single-level key present directly in *report*
+        """
+        if metric_key in report:
+            v = report[metric_key]
+            return float(v) if not isinstance(v, dict) else float("nan")
+
+        # Try split on first underscore to handle 'macro avg_f1-score' style
+        if "_" in metric_key:
+            idx = metric_key.index("_")
+            outer, inner = metric_key[:idx], metric_key[idx + 1:]
+            if outer in report and isinstance(report[outer], dict):
+                return float(report[outer].get(inner, float("nan")))
+
+        logger.warning(
+            "stopping_metric '%s' not found in classification report — "
+            "early stopping disabled for this step",
+            metric_key,
+        )
+        return float("-inf")
