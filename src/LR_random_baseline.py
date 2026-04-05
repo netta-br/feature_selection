@@ -74,14 +74,17 @@ def validation_report_to_df(validation_report, features_num):
   report['features_num'] = features_num
   return report.loc[report['class'] != 'accuracy']
 
-def plot_performance_with_stats(gene_expression_df:pd.DataFrame, 
-                                train_labels_df: pd.DataFrame, 
-                                val_labels_df: pd.DataFrame, 
-                                N_values: list[int], 
-                                random_seed: int, 
-                                num_runs: int, 
-                                lr_C: float = np.inf):
+def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
+                                train_labels_df: pd.DataFrame,
+                                val_labels_df: pd.DataFrame,
+                                N_values: list[int],
+                                random_seed: int,
+                                num_runs: int,
+                                lr_C: float = np.inf,
+                                return_summary: bool = False):
     all_runs_results = []
+    # Also collect per-run accuracy + macro f1 for the wide-format baseline_summary
+    acc_records = []
 
     for run_id in tqdm(range(num_runs), desc="Running experiments"):
         run_results = []
@@ -98,6 +101,17 @@ def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
             )
             # Convert validation report to DataFrame and append
             run_results.append(validation_report_to_df(validation_report, n))
+            # Capture accuracy + macro f1 for baseline_summary
+            acc_records.append({
+                'features_num': n,
+                'run_id': run_id,
+                'accuracy': validation_report.get('accuracy', float('nan')),
+                'macro_f1': (
+                    validation_report.get('macro avg', {}).get('f1-score', float('nan'))
+                    if isinstance(validation_report.get('macro avg'), dict)
+                    else float('nan')
+                ),
+            })
 
         # Concatenate results for the current run and add run_id
         current_run_df = pd.concat(run_results)
@@ -140,3 +154,16 @@ def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
     plt.grid(True)
     plt.legend(title='Metric')
     plt.show()
+
+    # Build wide-format baseline_summary: [features_num, acc_mean, acc_std, f1_mean, f1_std]
+    acc_df = pd.DataFrame(acc_records)
+    baseline_summary = (
+        acc_df.groupby('features_num')[['accuracy', 'macro_f1']]
+        .agg(['mean', 'std'])
+        .reset_index()
+    )
+    baseline_summary.columns = ['features_num', 'acc_mean', 'acc_std', 'f1_mean', 'f1_std']
+
+    if return_summary:
+        return baseline_summary
+    return None
