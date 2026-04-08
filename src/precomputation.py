@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import numpy as np
 
@@ -197,3 +199,182 @@ class FeatureRelevanceScores:
         """
         self.relevance_scores = pd.read_csv(filepath, index_col=0).squeeze("columns")
         print(f"Relevance scores loaded from {filepath} ({len(self.relevance_scores)} features)")
+
+
+class SymmetricUncertaintyMatrix:
+    """
+    Compute, save, and load the full Symmetric Uncertainty matrix for Mode A
+    precomputation.
+
+    The matrix covers all feature pairs plus one or more target columns,
+    so that a **single CSV** can be shared across different tasks on the same
+    feature set.  Layout: square CSV with feature names (and target names) as
+    both index and column headers.
+
+    Passing multiple targets via ``y`` avoids recomputing the expensive
+    feature-pair SU block when switching prediction tasks.
+
+    The MI intermediate matrix can optionally be saved alongside the SU matrix
+    via ``mi_filepath``.  If ``mi_filepath`` already exists when
+    ``compute_su_matrix`` is called, the MI computation is skipped and the
+    matrix is loaded from file instead (avoids recomputing expensive MI).
+    """
+
+    def __init__(self) -> None:
+        self.su_matrix: pd.DataFrame | None = None
+
+    # ------------------------------------------------------------------
+    # Class-method: compute full SU (and optionally MI) matrix, save CSV
+    # ------------------------------------------------------------------
+    @classmethod
+    def compute_su_matrix(
+        cls,
+        X: pd.DataFrame,
+        y: "pd.Series | list[pd.Series]",
+        filepath: str,
+        mi_filepath: str | None = None,
+    ) -> None:
+        """
+        Compute the full SU matrix for *X* and one or more targets, then save
+        to *filepath*.
+
+        Passing multiple target Series in *y* means the expensive feature-pair
+        SU block is computed **once** and all target columns are appended to
+        the same matrix.  A single CSV therefore serves every task that shares
+        the same feature set.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Samples × features matrix (NaNs already imputed).
+        y : pd.Series or list[pd.Series]
+            One or more target vectors.  Each Series must have a unique
+            ``.name`` attribute that does not clash with column names in *X*.
+        filepath : str
+            Destination CSV path for the SU matrix.
+        mi_filepath : str | None
+            Optional path to save (or load) the intermediate MI matrix.
+            If provided and the file already exists, MI is loaded from it
+            rather than recomputed.
+        """
+        from .filter.SymmetricUncertainty import SymmetricUncertainty
+
+        # Normalise y to a list of Series
+        if isinstance(y, pd.Series):
+            targets: list[pd.Series] = [y]
+        else:
+            targets = list(y)
+
+        target_names = [str(t.name) for t in targets]
+        # Validate uniqueness and no clash with feature names
+        for tname in target_names:
+            if tname in X.columns:
+                raise ValueError(
+                    f"Target name {tname!r} clashes with a feature column name."
+                )
+        if len(set(target_names)) != len(target_names):
+            raise ValueError("Duplicate target names are not allowed.")
+
+        feat_cols = list(X.columns)
+        all_cols = feat_cols + target_names
+        combined = X.copy()
+        for t in targets:
+            combined[str(t.name)] = t.values
+        N = len(all_cols)
+
+        # ── Discretise all columns once ────────────────────────────────
+        X_disc = np.stack(
+            [SymmetricUncertainty.discretise(combined[c].values) for c in all_cols],
+            axis=1,
+        )  # shape (n_samples, N)
+
+        # ── MI matrix ─────────────────────────────────────────────────
+        if mi_filepath is not None and os.path.exists(mi_filepath):
+            mi_df = pd.read_csv(mi_filepath, index_col=0)
+            # The cached MI file may have been computed with a subset of the
+            # current targets; extend it if new target columns are missing.
+            missing_cols = [c for c in all_cols if c not in mi_df.columns]
+            if missing_cols:
+                print(
+                    f"MI matrix loaded from {mi_filepath} — "
+                    f"extending with {len(missing_cols)} new column(s): {missing_cols}"
+                )
+                # Re-index to full all_cols; fill missing with NaN then compute
+                mi_df = mi_df.reindex(index=all_cols, columns=all_cols)
+                mi_arr = mi_df.values.astype(np.float64)
+                # Fill NaN cells (new target rows/cols)
+                for i, ci in enumerate(all_cols):
+                    for j, cj in enumerate(all_cols):
+                        if np.isnan(mi_arr[i, j]):
+                            if j < i:
+                                mi_arr[i, j] = mi_arr[j, i]
+                            elif i == j:
+                                mi_arr[i, j] = SymmetricUncertainty.entropy(X_disc[:, i])
+                            else:
+                                mi_arr[i, j] = SymmetricUncertainty.mutual_information(
+                                    X_disc[:, i], X_disc[:, j]
+                                )
+                # Re-save extended MI matrix
+                mi_df_new = pd.DataFrame(mi_arr, index=all_cols, columns=all_cols)
+                mi_df_new.to_csv(mi_filepath)
+                print(f"MI matrix (extended) saved to {mi_filepath}")
+            else:
+                mi_arr = mi_df.reindex(index=all_cols, columns=all_cols).values.astype(np.float64)
+                print(f"MI matrix loaded from {mi_filepath}")
+        else:
+            mi_arr = np.zeros((N, N), dtype=np.float64)
+            for i in range(N):
+                for j in range(N):
+                    if j < i:
+                        mi_arr[i, j] = mi_arr[j, i]
+                    elif j == i:
+                        mi_arr[i, j] = SymmetricUncertainty.entropy(X_disc[:, i])
+                    else:
+                        mi_arr[i, j] = SymmetricUncertainty.mutual_information(
+                            X_disc[:, i], X_disc[:, j]
+                        )
+
+            if mi_filepath is not None:
+                mi_df = pd.DataFrame(mi_arr, index=all_cols, columns=all_cols)
+                mi_df.to_csv(mi_filepath)
+                print(f"MI matrix saved to {mi_filepath}")
+
+        # ── Compute SU from MI and entropy ─────────────────────────────
+        # entropy vector H[i] = MI[i, i] (we stored H on the diagonal above)
+        H = np.diag(mi_arr).copy()          # shape (N,)
+        su_arr = np.zeros((N, N), dtype=np.float64)
+        for i in range(N):
+            for j in range(N):
+                denom = H[i] + H[j]
+                if denom == 0.0:
+                    su_arr[i, j] = 0.0
+                elif i == j:
+                    su_arr[i, j] = 1.0
+                else:
+                    su_arr[i, j] = min(1.0, 2.0 * mi_arr[i, j] / denom)
+
+        su_df = pd.DataFrame(su_arr, index=all_cols, columns=all_cols)
+        su_df.to_csv(filepath)
+        print(f"SU matrix saved to {filepath} {su_df.shape}")
+
+    # ------------------------------------------------------------------
+    # Instance method: load from CSV
+    # ------------------------------------------------------------------
+    def load_su_matrix(self, filepath: str) -> None:
+        """
+        Load a previously saved SU matrix from *filepath*.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the CSV saved by :py:meth:`compute_su_matrix`.
+        """
+        try:
+            self.su_matrix = pd.read_csv(filepath, index_col=0)
+            print(f"SU matrix loaded from {filepath} {self.su_matrix.shape}")
+        except FileNotFoundError:
+            print(f"Error: SU matrix file not found at {filepath}")
+            self.su_matrix = None
+        except Exception as exc:
+            print(f"Error loading SU matrix: {exc}")
+            self.su_matrix = None

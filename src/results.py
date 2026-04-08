@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -394,3 +394,61 @@ class SelectionResult:
         )
         plt.tight_layout()
         plt.show()
+
+
+# ---------------------------------------------------------------------------
+# WrapperSelectionResult dataclass
+# ---------------------------------------------------------------------------
+@dataclass
+class WrapperSelectionResult(SelectionResult):
+    """
+    Extends :class:`SelectionResult` with wrapper/MB-specific timing and
+    counters.
+
+    Timing breakdown
+    ----------------
+    ``selection_time_seconds``
+        Total selection time = ``filter_time_seconds`` + selection loop time.
+        (Inherited from ``SelectionResult``; redefined to include filter step.)
+    ``filter_time_seconds``
+        Time for the SU init step: discretise all columns, fill target column,
+        sort candidates descending by SU(f, C).  Set at ``__init__`` time.
+    ``classifier_time_seconds``
+        Accumulated time of all ``_cv_evaluate()`` calls made inside the
+        selection loop.  Sub-component of ``selection_time_seconds``.
+    ``test_evaluation_time_seconds``
+        Accumulated time of all ``_test_evaluate()`` calls on the validation
+        set.  These are made **outside** the timed selection loop.
+
+    Counters
+    --------
+    ``n_wrapper_evaluations``
+        Total ``_cv_evaluate()`` (cross-validation) calls made during
+        selection.
+    ``n_candidates_pruned``
+        Features removed from the candidate list by Markov Blanket pruning.
+        Zero if ``use_mb_pruning=False``.
+    ``n_evaluations_skipped``
+        Wrapper evaluations avoided because the candidate was pruned before
+        its turn.  Zero if ``use_mb_pruning=False``.
+    """
+
+    filter_time_seconds: float = 0.0
+    classifier_time_seconds: float = 0.0
+    test_evaluation_time_seconds: float = 0.0
+    n_wrapper_evaluations: int = 0
+    n_candidates_pruned: int = 0
+    n_evaluations_skipped: int = 0
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        lines = [
+            base,
+            f"  filter time         : {self.filter_time_seconds:.3f}s",
+            f"  classifier time     : {self.classifier_time_seconds:.3f}s",
+            f"  test eval time      : {self.test_evaluation_time_seconds:.3f}s",
+            f"  wrapper evaluations : {self.n_wrapper_evaluations}",
+            f"  candidates pruned   : {self.n_candidates_pruned}",
+            f"  evaluations skipped : {self.n_evaluations_skipped}",
+        ]
+        return "\n".join(lines)
