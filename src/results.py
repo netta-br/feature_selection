@@ -1,10 +1,48 @@
 from __future__ import annotations
 
+import math
+import sys
 from dataclasses import dataclass, field
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import numpy as np
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# ANSI color helpers (fall back to plain text when colors are not supported)
+# ---------------------------------------------------------------------------
+def _is_color_supported() -> bool:
+    """Return True when the output environment renders ANSI escape codes."""
+    if sys.stdout.isatty():
+        return True
+    try:
+        from IPython import get_ipython          # type: ignore[import-untyped]
+        return get_ipython() is not None          # Jupyter / IPython kernel
+    except ImportError:
+        return False
+
+
+def _ansi(code: str, text: str) -> str:
+    """Wrap *text* in an ANSI escape sequence when the environment supports it."""
+    if _is_color_supported():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+_GREEN  = "32"
+_YELLOW = "33"
+_RED    = "31"
+_GREY   = "90"
+_BOLD   = "1"
+
+
+def _green(t: str)  -> str: return _ansi(_GREEN,  t)
+def _yellow(t: str) -> str: return _ansi(_YELLOW, t)
+def _red(t: str)    -> str: return _ansi(_RED,    t)
+def _grey(t: str)   -> str: return _ansi(_GREY,   t)
+def _bold(t: str)   -> str: return _ansi(_BOLD,   t)
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +61,10 @@ class SelectionResult:
         ``'classification'`` or ``'regression'``.  Controls which metrics are
         rendered by :py:meth:`__str__` and which panels are drawn by
         :py:meth:`plot_vs_random_baseline` / :py:meth:`compare_results`.
+    label : str
+        Short human-readable abbreviation of the selector / configuration,
+        e.g. ``"IWSS-MB"`` or ``"mRmR-P"``.  Defaults to ``""``; set by the
+        selector when constructing the result, or by the caller afterwards.
     """
 
     selected_features: list[str]
@@ -30,9 +72,10 @@ class SelectionResult:
     stopping_reason: str                   # "max_features_reached" | "metric_threshold_reached" | "no_features_remaining"
     n_steps: int
     final_metrics: dict | None             # last entry of performance_history, or None
-    selection_time_seconds: float          # lazy on-demand compute time only
+    selection_time_seconds: float          # precompute + mRmR scoring loop time
     evaluation_time_seconds: float | None  # None if evaluation not performed
     task_type: str = "classification"      # "classification" | "regression"
+    label: str = ""                        # short method abbreviation; "" = unset
 
     # ------------------------------------------------------------------
     # String representation
@@ -45,6 +88,8 @@ class SelectionResult:
             f"  stopping reason   : {self.stopping_reason}",
             f"  selection time    : {self.selection_time_seconds:.3f}s",
         ]
+        if self.label:
+            lines.insert(1, f"  label             : {self.label}")
         if self.evaluation_time_seconds is not None:
             lines.append(f"  evaluation time   : {self.evaluation_time_seconds:.3f}s")
 
@@ -68,6 +113,209 @@ class SelectionResult:
 
         lines.append(f"  features          : {self.selected_features}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # compare_with — two-column rank-aligned diff table
+    # ------------------------------------------------------------------
+    def compare_with(
+        self,
+        other: SelectionResult,
+        self_label: str | None = None,
+        other_label: str | None = None,
+    ) -> None:
+        """Print a rank-aligned two-column comparison table for two results.
+
+        "Rank" is **selection order** — rank 1 = first feature selected,
+        rank 2 = second, etc.  A result with N features has exactly N rows;
+        rows beyond N show ``—``.
+
+        Color coding
+        ------------
+        - **Green**  — same feature at the same rank in both results.
+        - **Yellow** — feature is present in both results but at different ranks.
+        - **Red**    — feature appears in only one result (other cell shows ``—``).
+        - No marker  — cell is ``—`` because the result has fewer features.
+
+        Parameters
+        ----------
+        other : SelectionResult
+            The result to compare against.
+        self_label : str | None
+            Display name for this result.  Falls back to ``self.label`` or ``"A"``.
+        other_label : str | None
+            Display name for *other*.  Falls back to ``other.label`` or ``"B"``.
+        """
+        lbl_a = self_label  or self.label  or "A"
+        lbl_b = other_label or other.label or "B"
+
+        feats_a: list[str] = self.selected_features
+        feats_b: list[str] = other.selected_features
+
+        set_a   = set(feats_a)
+        set_b   = set(feats_b)
+        both    = set_a & set_b        # intersection — shared features
+        n_rows  = max(len(feats_a), len(feats_b))
+
+        # Column widths — pad to longest feature name or label
+        max_feat = max(
+            (len(f) for f in feats_a + feats_b),
+            default=8,
+        )
+        col_w = max(max_feat, len(lbl_a), len(lbl_b), 8)
+
+        # Header
+        rank_w = max(4, len(str(n_rows)))
+        sep    = "─" * (rank_w + 2) + "┼" + "─" * (col_w + 2) + "┼" + "─" * (col_w + 2)
+        header = (
+            f"{'rank':>{rank_w}} │ {lbl_a:<{col_w}} │ {lbl_b:<{col_w}}"
+        )
+        print(f"\nComparing {lbl_a} (N={len(feats_a)}) vs {lbl_b} (N={len(feats_b)})")
+        print(sep)
+        print(header)
+        print(sep)
+
+        for r in range(1, n_rows + 1):
+            cell_a = feats_a[r - 1] if r <= len(feats_a) else None
+            cell_b = feats_b[r - 1] if r <= len(feats_b) else None
+
+            def _fmt(feat: str | None, other_set: set[str]) -> str:
+                if feat is None:
+                    return _grey("—".ljust(col_w))
+                if cell_a == cell_b:
+                    # same feature at same rank → green
+                    return _green(feat.ljust(col_w))
+                if feat in both:
+                    # in both results but at a different rank → yellow
+                    return _yellow(feat.ljust(col_w))
+                # only in one result → red
+                return _red(feat.ljust(col_w))
+
+            fa = _fmt(cell_a, set_b)
+            fb = _fmt(cell_b, set_a)
+            print(f"{r:>{rank_w}} │ {fa} │ {fb}")
+
+        print(sep)
+        # Legend
+        print(
+            _green("■") + " same rank  "
+            + _yellow("■") + " diff rank  "
+            + _red("■") + " one result only  "
+            + _grey("—") + " beyond result length"
+        )
+
+    # ------------------------------------------------------------------
+    # summary_report — multi-result per-feature stats
+    # ------------------------------------------------------------------
+    @staticmethod
+    def summary_report(
+        results: list[SelectionResult],
+        labels: list[str] | None = None,
+        top_n: int | None = None,
+        max_labels_display: int = 5,
+    ) -> pd.DataFrame:
+        """Print and return a per-feature summary across multiple results.
+
+        For every unique feature that appears in at least one result, compute:
+
+        - ``count``      — number of results that include the feature.
+        - ``pct``        — ``count / len(results) * 100``.
+        - ``mean_rank``  — mean selection-order rank (1-based) across results
+                           that include the feature.
+        - ``min_rank``   — lowest (best) rank across those results.
+        - ``max_rank``   — highest (worst) rank across those results.
+        - ``selected_by``— up to ``max_labels_display`` result labels, ordered
+                           by rank ascending then alphabetically, truncated
+                           with ``…`` if more exist.
+
+        Rows are sorted by ``count`` descending, then ``mean_rank`` ascending.
+
+        Parameters
+        ----------
+        results : list[SelectionResult]
+            Results to summarise.  Must be non-empty.
+        labels : list[str] | None
+            One label per result.  Falls back to ``result.label`` for each
+            entry; entries still empty become ``"R1"``, ``"R2"``, … .
+        top_n : int | None
+            If set, return only the top-N rows (after sorting).
+        max_labels_display : int
+            Maximum number of result labels to show in the ``selected_by``
+            column.  Default ``5``.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``feature``, ``count``, ``pct``, ``mean_rank``,
+            ``min_rank``, ``max_rank``, ``selected_by``.
+        """
+        if not results:
+            raise ValueError("results must be non-empty")
+
+        n = len(results)
+
+        # Resolve labels
+        resolved: list[str] = []
+        for i, res in enumerate(results):
+            if labels is not None and i < len(labels) and labels[i]:
+                resolved.append(labels[i])
+            elif res.label:
+                resolved.append(res.label)
+            else:
+                resolved.append(f"R{i + 1}")
+
+        # Build {feature: [(rank, label), ...]} mapping
+        feat_info: dict[str, list[tuple[int, str]]] = {}
+        for res, lbl in zip(results, resolved):
+            for rank, feat in enumerate(res.selected_features, start=1):
+                feat_info.setdefault(feat, []).append((rank, lbl))
+
+        # Aggregate
+        rows = []
+        for feat, entries in feat_info.items():
+            ranks = [r for r, _ in entries]
+            count = len(ranks)
+            pct   = count / n * 100.0
+            mean_r = float(np.mean(ranks))
+            min_r  = int(min(ranks))
+            max_r  = int(max(ranks))
+
+            # selected_by: sort entries by rank asc, then label asc; truncate
+            sorted_entries = sorted(entries, key=lambda x: (x[0], x[1]))
+            lbls = [lbl for _, lbl in sorted_entries]
+            if len(lbls) <= max_labels_display:
+                selected_by = ", ".join(lbls)
+            else:
+                selected_by = ", ".join(lbls[:max_labels_display]) + ", …"
+
+            rows.append({
+                "feature":     feat,
+                "count":       count,
+                "pct":         round(pct, 1),
+                "mean_rank":   round(mean_r, 2),
+                "min_rank":    min_r,
+                "max_rank":    max_r,
+                "selected_by": selected_by,
+            })
+
+        df = (
+            pd.DataFrame(rows)
+            .sort_values(["count", "mean_rank"], ascending=[False, True])
+            .reset_index(drop=True)
+        )
+
+        if top_n is not None:
+            df = df.head(top_n)
+
+        # Print
+        total_features = df["feature"].nunique()
+        print(f"\nFeature summary across {n} results ({total_features} unique features):")
+        print(f"Labels: {', '.join(resolved)}\n")
+        try:
+            display(df)          # type: ignore[name-defined]  # noqa: F821
+        except NameError:
+            print(df.to_string(index=False))
+
+        return df
 
     # ------------------------------------------------------------------
     # plot_vs_random_baseline (instance method)

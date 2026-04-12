@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 import sys
 from time import perf_counter
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.metrics import accuracy_score, r2_score
 
-from ..filter.SymmetricUncertainty import SymmetricUncertainty
-from ..precomputation import SymmetricUncertaintyMatrix
+from ..score_calculator import ScoreCalculator, infer_task_type
+from ..score_matrix import ScoreMatrix
 from ..results import SelectionResult, WrapperSelectionResult
 
 # ---------------------------------------------------------------------------
@@ -62,25 +61,27 @@ class WrapperSelector:
     use_mb_pruning : bool
         If ``True``, apply vectorised Approximate Markov Blanket pruning
         after each feature is accepted (Definition 5, Wang et al.).
-    classifier : sklearn-compatible estimator or None
+    evaluator : sklearn-compatible estimator or None
         Duck-typed ``fit`` / ``predict`` estimator.  Defaults to
-        ``LogisticRegression(max_iter=1000, C=np.inf)``.
+        ``LogisticRegression(max_iter=1000, C=np.inf)`` for classification
+        or ``Ridge(alpha=1.0)`` for regression (chosen after task-type
+        detection).
     min_features : int
         Minimum set size required before a candidate can be accepted.
     cv_folds : int
         Number of folds for cross-validation inside the selection loop.
     cv_min_folds : int
-        Minimum number of folds that must satisfy the dual improvement
-        condition for a candidate to be accepted.
+        Minimum number of folds that must satisfy the improvement condition
+        for a candidate to be accepted.
     patience : int or None
         Stop after this many consecutive steps with no accepted feature.
         ``None`` disables patience-based stopping.
     su_filepath : str or None
-        Mode A: path to a precomputed SU matrix CSV.  If the file exists it
+        Mode A: path to a precomputed SU matrix file.  If the file exists it
         is loaded; if it does not, the matrix is computed and saved there.
         ``None`` → Mode B (incremental lazy fill).
     random_seed : int or None
-        Forwarded to classifier and CV splitter for reproducibility.
+        Forwarded to evaluator and CV splitter for reproducibility.
     """
 
     def __init__(
@@ -91,7 +92,7 @@ class WrapperSelector:
         y_val: pd.Series,
         use_su_ranking: bool = True,
         use_mb_pruning: bool = True,
-        classifier=None,
+        evaluator=None,
         min_features: int = 1,
         cv_folds: int = 5,
         cv_min_folds: int = 3,
@@ -121,29 +122,29 @@ class WrapperSelector:
         self._y_val: pd.Series = y_val
         self._target_col: str = str(y_train.name)
 
-        # Classifier
-        if classifier is None:
-            self._classifier = LogisticRegression(
-                max_iter=1000, C=np.inf, random_state=random_seed
-            )
+        # Task type detection (must precede evaluator default selection)
+        self._task_type: str = infer_task_type(y_train.values)
+
+        # Evaluator — default depends on task type
+        if evaluator is None:
+            if self._task_type == "classification":
+                self._evaluator = LogisticRegression(
+                    max_iter=1000, C=np.inf, random_state=random_seed
+                )
+            else:
+                self._evaluator = Ridge(alpha=1.0, random_state=random_seed)
         else:
-            self._classifier = classifier
+            self._evaluator = evaluator
 
-        # Task type detection
-        self._task_type: str = self._detect_task_type()
-
-        # SU infrastructure (populated only when needed)
-        self._X_disc: np.ndarray | None = None
-        self._col_index: dict[str, int] | None = None
-        self._su_arr: np.ndarray | None = None
-        self._col_filled: set[int] = set()
-        self._su_bulk_done: bool = False
+        # ── ScoreCalculator / ScoreMatrix ──────────────────────────────
+        self._calc: ScoreCalculator | None = None
+        self._sm: ScoreMatrix | None = None
         self._filter_time_seconds: float = 0.0
 
         # Candidate list (built at init)
         self._candidates: list[str] = []
 
-        # Build SU and candidates
+        # Build SU calculator and candidates
         self._init_candidates()
 
         logger.info(
@@ -162,13 +163,8 @@ class WrapperSelector:
     # ------------------------------------------------------------------
     # Initialisation helpers
     # ------------------------------------------------------------------
-    def _detect_task_type(self) -> str:
-        if self._y_train.nunique() < 0.1 * len(self._y_train):
-            return "classification"
-        return "regression"
-
     def _init_candidates(self) -> None:
-        """Build _candidates list; set up SU infrastructure if needed."""
+        """Build _candidates list; set up SU ScoreCalculator if needed."""
         needs_su = self.use_su_ranking or self.use_mb_pruning
 
         if not needs_su:
@@ -177,38 +173,54 @@ class WrapperSelector:
 
         t0 = perf_counter()
 
-        # ── Discretise all columns once ────────────────────────────────
-        all_cols = list(self._X_filled.columns) + [self._target_col]
-        combined = pd.concat(
-            [self._X_filled, self._y_train.rename(self._target_col)], axis=1
+        # Build ScoreCalculator with SU method
+        self._calc = ScoreCalculator(
+            X=self._X_filled.values,
+            feature_names=list(self._X_filled.columns),
+            target_name=self._target_col,
+            target_col=self._y_train.values,
+            method="su",
+            random_seed=self.random_seed,
         )
-        self._X_disc = np.stack(
-            [SymmetricUncertainty.discretise(combined[c].values) for c in all_cols],
-            axis=1,
-        ).astype(np.int8)
 
-        n = len(all_cols)
-        self._col_index = {name: i for i, name in enumerate(all_cols)}
-
-        # Allocate SU array
-        self._su_arr = np.full((n, n), np.nan, dtype=np.float64)
-        np.fill_diagonal(self._su_arr, 1.0)
-
-        # ── Mode A: load or compute full matrix ────────────────────────
         if self.su_filepath is not None:
-            self._load_or_compute_su_matrix()
+            # Mode A — precomputed SU matrix
+            self._sm = ScoreMatrix(
+                X=self._X_filled.values,
+                feature_names=list(self._X_filled.columns),
+                target_names=[self._target_col],
+                target_data=self._y_train.values[:, None],
+                method="su",
+                filepath=self.su_filepath,
+                file_format="csv",  # backward compat with existing CSV files
+                random_seed=self.random_seed,
+            )
+            self._sm.precompute()
+
+            # Populate calc's relevance from the precomputed matrix
+            target_idx = self._sm.index[self._target_col]
+            feat_names = list(self._X_filled.columns)
+            feat_idxs_sm = np.array(
+                [self._sm.index[f] for f in feat_names], dtype=np.intp
+            )
+            relevance_from_matrix = self._sm.arr[target_idx, feat_idxs_sm]
+            self._calc._relevance_vec = relevance_from_matrix.copy()
+            self._calc._redundancy_acc = np.zeros(self._calc._N, dtype=np.float64)
+            self._calc._n_selected = 0
+
+            # Also ensure disc cache is built for compute_row calls
+            self._calc._ensure_disc()
         else:
-            # Mode B: fill target column only at init
-            self._fill_column(self._target_col)
+            # Mode B — single-target calculator only
+            self._calc.init_target()
 
         self._filter_time_seconds = perf_counter() - t0
 
-        # Build ranked candidates
-        tgt_idx = self._col_index[self._target_col]
-        feat_cols = list(self._X_filled.columns)
-        feat_idxs = np.array([self._col_index[f] for f in feat_cols], dtype=np.intp)
-        su_vs_target = self._su_arr[feat_idxs, tgt_idx]
+        # Build ranked candidates from relevance vector
+        feat_idxs = np.arange(len(self._X_filled.columns), dtype=np.intp)
+        su_vs_target = self._calc.get_relevance(feat_idxs)
 
+        feat_cols = list(self._X_filled.columns)
         if self.use_su_ranking:
             order = np.argsort(-su_vs_target)
             self._candidates = [feat_cols[i] for i in order]
@@ -225,103 +237,6 @@ class WrapperSelector:
             if len(feat_cols) > 0 else 0.0,
         )
 
-    def _load_or_compute_su_matrix(self) -> None:
-        """
-        Mode A: load SU matrix from CSV, or compute+save if missing.
-
-        If the file already exists but does not yet contain the current target
-        column (e.g. a shared SU file was built for a different task), the
-        target column is appended by calling ``compute_su_matrix`` again with
-        the updated target list derived from the already-loaded matrix.
-        """
-        assert self.su_filepath is not None
-        um = SymmetricUncertaintyMatrix()
-        if os.path.exists(self.su_filepath):
-            um.load_su_matrix(self.su_filepath)
-            # If the current target is absent from the cached matrix, extend it.
-            if (
-                um.su_matrix is not None
-                and self._target_col not in um.su_matrix.columns
-            ):
-                logger.info(
-                    "Target '%s' not found in existing SU matrix at %s — "
-                    "extending matrix with new target column.",
-                    self._target_col,
-                    self.su_filepath,
-                )
-                SymmetricUncertaintyMatrix.compute_su_matrix(
-                    X=self._X_filled,
-                    y=self._y_train,
-                    filepath=self.su_filepath,
-                )
-                um.load_su_matrix(self.su_filepath)
-        else:
-            SymmetricUncertaintyMatrix.compute_su_matrix(
-                X=self._X_filled,
-                y=self._y_train,
-                filepath=self.su_filepath,
-            )
-            um.load_su_matrix(self.su_filepath)
-
-        if um.su_matrix is None:
-            logger.warning(
-                "SU matrix failed to load from %s — falling back to Mode B",
-                self.su_filepath,
-            )
-            self._fill_column(self._target_col)
-            return
-
-        # Overwrite _su_arr from loaded DataFrame
-        df = um.su_matrix
-        for col_name, col_idx in self._col_index.items():
-            if col_name in df.index:
-                for row_name, row_idx in self._col_index.items():
-                    if row_name in df.columns:
-                        val = df.loc[row_name, col_name]
-                        if not np.isnan(val):
-                            self._su_arr[row_idx, col_idx] = float(val)
-
-        self._su_bulk_done = True
-        self._col_filled = set(self._col_index.values())
-
-    # ------------------------------------------------------------------
-    # Incremental column-fill (Mode B)
-    # ------------------------------------------------------------------
-    def _fill_column(self, col_name: str) -> None:
-        """
-        Fill the row/column for *col_name* in ``_su_arr`` in one vectorised
-        call.  No-op if already filled or ``_su_bulk_done``.
-        """
-        if self._su_arr is None or self._col_index is None or self._X_disc is None:
-            return
-        if self._su_bulk_done:
-            return
-        idx = self._col_index.get(col_name)
-        if idx is None or idx in self._col_filled:
-            return
-
-        anchor = self._X_disc[:, idx]
-        su_row = SymmetricUncertainty.compute_su_column(anchor, self._X_disc)
-
-        self._su_arr[idx, :] = su_row
-        self._su_arr[:, idx] = su_row
-        self._col_filled.add(idx)
-
-    def _get_su(self, col_a: str, col_b: str) -> float:
-        """Integer-index SU access with lazy fill on miss."""
-        if self._su_arr is None or self._col_index is None:
-            return 0.0
-        ia = self._col_index.get(col_a)
-        ib = self._col_index.get(col_b)
-        if ia is None or ib is None:
-            return 0.0
-        if ia not in self._col_filled:
-            self._fill_column(col_a)
-        if ib not in self._col_filled:
-            self._fill_column(col_b)
-        val = self._su_arr[ia, ib]
-        return float(val) if not np.isnan(val) else 0.0
-
     # ------------------------------------------------------------------
     # Vectorised MB pruning
     # ------------------------------------------------------------------
@@ -329,24 +244,39 @@ class WrapperSelector:
         """
         Vectorised Approximate Markov Blanket pruning (Definition 5).
 
-        ``_fill_column(selected_feat)`` must have been called before this.
+        Uses ScoreCalculator.compute_row for the SU vector between
+        the selected feature and all remaining candidates.
 
         Returns list of pruned feature names (removed from ``_candidates``).
         """
         if not self._candidates:
             return []
-        assert self._su_arr is not None
-        assert self._col_index is not None
+        assert self._calc is not None
 
-        sel_idx = self._col_index[selected_feat]
-        tgt_idx = self._col_index[self._target_col]
+        sel_idx = self._calc._index[selected_feat]
+        tgt_idx = self._calc._index[self._target_col]
+
         cand_idxs = np.array(
-            [self._col_index[c] for c in self._candidates], dtype=np.intp
+            [self._calc._index[c] for c in self._candidates], dtype=np.intp
         )
 
-        su_sel_C    = self._su_arr[sel_idx, tgt_idx]           # scalar
-        su_cand_C   = self._su_arr[cand_idxs, tgt_idx]         # vector
-        su_sel_cand = self._su_arr[sel_idx, cand_idxs]         # vector
+        # SU(selected_feat, target) — scalar
+        su_sel_C = self._calc.get_relevance(np.array([sel_idx], dtype=np.intp))[0]
+
+        # SU(candidates, target) — vector
+        su_cand_C = self._calc.get_relevance(cand_idxs)
+
+        # SU(selected_feat, candidates) — vector via compute_row
+        if self._sm is not None:
+            # Mode A: read from precomputed matrix
+            sm_sel_idx = self._sm.index[selected_feat]
+            sm_cand_idxs = np.array(
+                [self._sm.index[c] for c in self._candidates], dtype=np.intp
+            )
+            su_sel_cand = self._sm.arr[sm_sel_idx, sm_cand_idxs]
+        else:
+            # Mode B: compute on-the-fly
+            su_sel_cand = self._calc.compute_row(sel_idx, cand_idxs)
 
         redundant_mask = (su_sel_C >= su_cand_C) & (su_sel_cand > su_cand_C)
 
@@ -362,39 +292,35 @@ class WrapperSelector:
         return pruned
 
     # ------------------------------------------------------------------
-    # CV evaluation (selection-driving, on X_train only)
+    # CV evaluation — mean-only baseline
     # ------------------------------------------------------------------
     def _cv_evaluate(
         self,
         features: list[str],
-        baseline_scores: np.ndarray,
-    ) -> tuple[float, int, np.ndarray]:
+        baseline_mean: float,
+    ) -> tuple[float, int]:
         """
         k-fold CV on ``_X_filled[features]`` / ``y_train``.
 
-        Acceptance criterion per fold (dual condition):
-          (a) fold_score_new >= baseline_mean  (beats global average baseline)
-          (b) fold_score_new >  baseline_scores[k]  (beats this fold's baseline)
+        Acceptance criterion per fold:
+          fold_score > baseline_mean
 
         Parameters
         ----------
         features : list[str]
             Feature set to evaluate (includes the candidate).
-        baseline_scores : np.ndarray
-            Per-fold scores of the current selected set (before adding
-            candidate).  Shape ``(cv_folds,)``.
+        baseline_mean : float
+            Mean CV score of the current selected set (before adding
+            candidate).  Each fold is compared against this scalar.
 
         Returns
         -------
         mean_score : float
         n_improved : int
-            Count of folds satisfying the dual condition.
-        fold_scores : np.ndarray
-            Per-fold scores for this call (shape ``(cv_folds,)``).
+            Count of folds satisfying ``fold_score > baseline_mean``.
         """
         X = self._X_filled[features].values
         y = self._y_train.values
-        baseline_mean = float(baseline_scores.mean())
 
         if self._task_type == "classification":
             splitter = StratifiedKFold(
@@ -407,7 +333,7 @@ class WrapperSelector:
 
         fold_scores = np.empty(self.cv_folds, dtype=np.float64)
         for k, (train_idx, val_idx) in enumerate(splitter.split(X, y)):
-            clf = copy.deepcopy(self._classifier)
+            clf = copy.deepcopy(self._evaluator)
             clf.fit(X[train_idx], y[train_idx])
             y_pred = clf.predict(X[val_idx])
             if self._task_type == "classification":
@@ -416,24 +342,20 @@ class WrapperSelector:
                 fold_scores[k] = r2_score(y[val_idx], y_pred)
 
         mean_score = float(fold_scores.mean())
-
-        # Dual condition: (a) >= baseline_mean  AND  (b) > per-fold baseline
-        improved = (fold_scores >= baseline_mean) & (fold_scores > baseline_scores)
-        n_improved = int(improved.sum())
-
-        return mean_score, n_improved, fold_scores
+        n_improved = int((fold_scores > baseline_mean).sum())
+        return mean_score, n_improved
 
     # ------------------------------------------------------------------
     # Test/validation evaluation (outside timed loop)
     # ------------------------------------------------------------------
     def _test_evaluate(self, features: list[str]) -> dict:
         """
-        Fit classifier on full training set, score on validation set.
+        Fit evaluator on full training set, score on validation set.
 
         Returns a metrics dict compatible with SelectionResult's
         performance_history format.
         """
-        clf = copy.deepcopy(self._classifier)
+        clf = copy.deepcopy(self._evaluator)
         X_tr = self._X_filled[features].values
         X_vl = self._X_val_filled[features].values
         y_tr = self._y_train.values
@@ -475,6 +397,151 @@ class WrapperSelector:
         return float("-inf")
 
     # ------------------------------------------------------------------
+    # run() helper — IWSS: evaluate a single ranked candidate
+    # ------------------------------------------------------------------
+    def _run_iwss_step(
+        self,
+        candidate: str,
+        selected: list[str],
+        baseline_mean: float,
+    ) -> tuple[bool, float, int, float]:
+        """
+        Evaluate *candidate* in IWSS mode.
+
+        Returns
+        -------
+        accepted : bool
+        mean_s   : float   CV mean score
+        n_imp    : int     folds improved
+        dt_clf   : float   wall-clock seconds for the CV call
+        """
+        t0 = perf_counter()
+        mean_s, n_imp = self._cv_evaluate([*selected, candidate], baseline_mean)
+        dt_clf = perf_counter() - t0
+
+        accepted = (
+            n_imp >= self.cv_min_folds
+            and mean_s > baseline_mean
+            and len(selected) + 1 >= self.min_features
+        )
+        return accepted, mean_s, n_imp, dt_clf
+
+    # ------------------------------------------------------------------
+    # run() helper — SFS: exhaustive search over remaining candidates
+    # ------------------------------------------------------------------
+    def _run_sfs_step(
+        self,
+        candidates_slice: list[str],
+        selected: list[str],
+        baseline_mean: float,
+    ) -> tuple[str | None, float, float, int]:
+        """
+        Exhaustive best-feature search over *candidates_slice* (SFS mode).
+
+        Evaluates every candidate and returns the one with the highest mean
+        CV score that also satisfies the acceptance predicate.
+
+        Returns
+        -------
+        best_feat  : str | None   best candidate, or None if none qualifies
+        best_mean  : float        mean CV score of best candidate
+        dt_clf     : float        total wall-clock seconds for all CV calls
+        n_evals    : int          number of CV calls made
+        """
+        best_feat: str | None = None
+        best_mean: float = baseline_mean
+        best_n_imp: int = 0
+        dt_clf: float = 0.0
+        n_evals: int = 0
+
+        for c in candidates_slice:
+            t0 = perf_counter()
+            mean_s, n_imp = self._cv_evaluate([*selected, c], baseline_mean)
+            dt_clf += perf_counter() - t0
+            n_evals += 1
+
+            if (
+                n_imp >= self.cv_min_folds
+                and mean_s > best_mean
+                and len(selected) + 1 >= self.min_features
+            ):
+                best_feat = c
+                best_mean = mean_s
+                best_n_imp = n_imp
+
+        return best_feat, best_mean, dt_clf, n_evals
+
+    # ------------------------------------------------------------------
+    # run() helper — MB pruning (flag check lives in run())
+    # ------------------------------------------------------------------
+    def _prune_candidates(
+        self,
+        candidates: list[str],
+        accepted_feat: str,
+        accepted_pos: int,
+    ) -> tuple[list[str], int]:
+        """
+        Remove ``accepted_feat`` from ``candidates`` at ``accepted_pos``,
+        then apply vectorised MB pruning.
+
+        The ``use_mb_pruning`` flag check is performed by the caller
+        (``run()``); this helper assumes pruning is desired.
+
+        Syncs ``self._candidates`` with the local list so
+        ``_mb_prune_vectorised`` operates on the correct state.
+
+        Returns
+        -------
+        updated_candidates : list[str]
+        n_pruned           : int
+        """
+        # Remove the just-accepted feature from the working list
+        if accepted_pos < len(candidates) and candidates[accepted_pos] == accepted_feat:
+            candidates.pop(accepted_pos)
+
+        self._candidates = candidates
+        pruned = self._mb_prune_vectorised(accepted_feat)
+        candidates = self._candidates
+        return candidates, len(pruned)
+
+    # ------------------------------------------------------------------
+    # run() helper — test-eval predicate (pure)
+    # ------------------------------------------------------------------
+    def _should_test_eval(
+        self,
+        n_selected: int,
+        last_eval_step: int,
+        n_features_to_select: int,
+        candidates_remaining: int,
+        k: int,
+    ) -> bool:
+        """Return True when a test/validation evaluation should be triggered."""
+        return (
+            n_selected > last_eval_step
+            and (
+                n_selected % k == 0
+                or n_selected == n_features_to_select
+                or candidates_remaining == 0
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # run() helper — timed test evaluation
+    # ------------------------------------------------------------------
+    def _run_test_eval(self, selected: list[str]) -> tuple[dict, float]:
+        """
+        Run ``_test_evaluate`` and measure wall-clock time.
+
+        Returns
+        -------
+        metrics : dict
+        dt      : float   seconds elapsed
+        """
+        t0 = perf_counter()
+        metrics = self._test_evaluate(selected)
+        return metrics, perf_counter() - t0
+
+    # ------------------------------------------------------------------
     # Main selection loop
     # ------------------------------------------------------------------
     def run(
@@ -505,12 +572,10 @@ class WrapperSelector:
         if test_eval_every_k < 1:
             raise ValueError(f"test_eval_every_k must be >= 1; got {test_eval_every_k}")
 
-        # Reset mutable candidate list to a fresh copy for this run
-        candidates = list(self._candidates)  # local copy; may be mutated by MB pruning
+        # Local mutable copy of candidates for this run
+        candidates = list(self._candidates)
 
         selected: list[str] = []
-        # CV baseline: per-fold scores for the *current* selected set
-        cv_baseline_scores = np.zeros(self.cv_folds, dtype=np.float64)
         cv_baseline_mean: float = 0.0
 
         performance_history: list[dict] = []
@@ -522,7 +587,7 @@ class WrapperSelector:
         n_pruned: int = 0
         n_skipped: int = 0
         no_improvement_streak: int = 0
-        _last_eval_step: int = 0   # tracks step at which test eval last ran
+        last_eval_step: int = 0
 
         # ── START selection timer ──────────────────────────────────────
         t0_selection = perf_counter()
@@ -530,128 +595,41 @@ class WrapperSelector:
         i = 0
         while i < len(candidates) and len(selected) < n_features_to_select:
 
-            if not self.use_su_ranking:
-                # ── SFS mode: exhaustive search over remaining candidates ──
-                best_feat: str | None = None
-                best_mean: float = cv_baseline_mean
-                best_n_improved: int = 0
-                best_fold_scores: np.ndarray | None = None
-
-                for c in candidates[i:]:
-                    if self.use_mb_pruning:
-                        self._fill_column(c)
-                    t0_clf = perf_counter()
-                    mean_s, n_imp, fold_s = self._cv_evaluate(
-                        [*selected, c], cv_baseline_scores
-                    )
-                    t_classifier += perf_counter() - t0_clf
-                    n_selection_evals += 1
-
-                    if (
-                        n_imp >= self.cv_min_folds
-                        and mean_s > best_mean
-                        and len(selected) + 1 >= self.min_features
-                    ):
-                        best_feat = c
-                        best_mean = mean_s
-                        best_n_improved = n_imp
-                        best_fold_scores = fold_s
-
-                if best_feat is None:
-                    no_improvement_streak += 1
-                    if (
-                        self.patience is not None
-                        and no_improvement_streak >= self.patience
-                    ):
-                        stopping_reason = "patience_exceeded"
-                        break
-                    stopping_reason = "no_improvement"
-                    break
-
-                # Move best to position i
-                candidates.remove(best_feat)
-                candidates.insert(i, best_feat)
-                selected.append(best_feat)
-                cv_baseline_scores = best_fold_scores  # type: ignore[assignment]
-                cv_baseline_mean = best_mean
-                no_improvement_streak = 0
-
-                logger.info(
-                    "Step %d (SFS): selected '%s' mean_cv=%.4f n_improved=%d",
-                    len(selected), best_feat, best_mean, best_n_improved,
+            if self.use_su_ranking:
+                # ── IWSS mode ─────────────────────────────────────────
+                accepted, mean_s, n_imp, dt = self._run_iwss_step(
+                    candidates[i], selected, cv_baseline_mean
                 )
-
-                if self.use_mb_pruning:
-                    # Remove the accepted feature (at position i) before pruning
-                    if i < len(candidates) and candidates[i] == best_feat:
-                        candidates.pop(i)
-                    self._candidates = candidates  # sync for _mb_prune_vectorised
-                    pruned = self._mb_prune_vectorised(best_feat)
-                    candidates = self._candidates   # sync back
-                    n_pruned += len(pruned)
-                    n_skipped += len(pruned)
-                    if pruned:
-                        logger.info(
-                            "  MB pruned %d candidates: %s",
-                            len(pruned), pruned[:5],
-                        )
-
-            else:
-                # ── IWSS mode: evaluate next ranked candidate ──────────
-                candidate = candidates[i]
-
-                if self.use_mb_pruning:
-                    self._fill_column(candidate)
-
-                t0_clf = perf_counter()
-                mean_s, n_imp, fold_s = self._cv_evaluate(
-                    [*selected, candidate], cv_baseline_scores
-                )
-                t_classifier += perf_counter() - t0_clf
+                t_classifier += dt
                 n_selection_evals += 1
 
-                accepted = (
-                    n_imp >= self.cv_min_folds
-                    and mean_s > cv_baseline_mean
-                    and len(selected) + 1 >= self.min_features
-                )
-
                 if accepted:
-                    selected.append(candidate)
-                    cv_baseline_scores = fold_s
+                    feat = candidates[i]
+                    selected.append(feat)
                     cv_baseline_mean = mean_s
                     no_improvement_streak = 0
 
                     logger.info(
                         "Step %d (IWSS): selected '%s' mean_cv=%.4f n_improved=%d",
-                        len(selected), candidate, mean_s, n_imp,
+                        len(selected), feat, mean_s, n_imp,
                     )
 
                     if self.use_mb_pruning:
-                        # Remove the accepted feature at position i before pruning
-                        if i < len(candidates) and candidates[i] == candidate:
-                            candidates.pop(i)
-                        self._candidates = candidates
-                        pruned = self._mb_prune_vectorised(candidate)
-                        candidates = self._candidates
-                        n_pruned += len(pruned)
-                        n_skipped += len(pruned)
-                        if pruned:
-                            logger.info(
-                                "  MB pruned %d candidates: %s",
-                                len(pruned), pruned[:5],
-                            )
-                        # i stays the same — pop(i) already advanced past the
-                        # accepted feature; outer i += 1 would skip the next
-                        # candidate, so we continue directly.
-                        i += 1
+                        candidates, np_ = self._prune_candidates(candidates, feat, i)
+                        n_pruned += np_
+                        n_skipped += np_
+                        if np_:
+                            logger.info("  MB pruned %d candidates", np_)
+                        # pop(i) already removed the accepted feature and advanced
+                        # the list — do NOT increment i here; the next unprocessed
+                        # candidate is now at position i.
                         continue
-                    # Without MB pruning: outer i += 1 advances past accepted feature
+                    # Without MB pruning: fall through to i += 1
                 else:
                     no_improvement_streak += 1
                     logger.debug(
                         "  Candidate '%s' rejected (mean=%.4f n_imp=%d streak=%d)",
-                        candidate, mean_s, n_imp, no_improvement_streak,
+                        candidates[i], mean_s, n_imp, no_improvement_streak,
                     )
                     if (
                         self.patience is not None
@@ -662,35 +640,65 @@ class WrapperSelector:
 
                 i += 1
 
-            # ── Test/validation evaluation (OUTSIDE timed loop) ───────
-            # Only trigger when a new feature was actually added since last eval.
-            _n_selected = len(selected)
-            _should_test_eval = (
-                _n_selected > _last_eval_step  # a new feature was added
-                and (
-                    _n_selected % test_eval_every_k == 0
-                    or _n_selected == n_features_to_select
-                    or i >= len(candidates)
+            else:
+                # ── SFS mode ──────────────────────────────────────────
+                best, best_mean, dt, n_evals = self._run_sfs_step(
+                    candidates[i:], selected, cv_baseline_mean
                 )
-            )
-            if _should_test_eval:
-                t0_test = perf_counter()
-                metrics = self._test_evaluate(selected)
-                t_test_eval += perf_counter() - t0_test
+                t_classifier += dt
+                n_selection_evals += n_evals
+
+                if best is None:
+                    no_improvement_streak += 1
+                    if (
+                        self.patience is not None
+                        and no_improvement_streak >= self.patience
+                    ):
+                        stopping_reason = "patience_exceeded"
+                        break
+                    stopping_reason = "no_improvement"
+                    break
+
+                # Move best to position i (stable ordering)
+                candidates.remove(best)
+                candidates.insert(i, best)
+                selected.append(best)
+                cv_baseline_mean = best_mean
+                no_improvement_streak = 0
+
+                logger.info(
+                    "Step %d (SFS): selected '%s' mean_cv=%.4f",
+                    len(selected), best, best_mean,
+                )
+
+                if self.use_mb_pruning:
+                    candidates, np_ = self._prune_candidates(candidates, best, i)
+                    n_pruned += np_
+                    n_skipped += np_
+                    if np_:
+                        logger.info("  MB pruned %d candidates", np_)
+
+            # ── Test/validation evaluation (OUTSIDE timed loop) ───────
+            _n_selected = len(selected)
+            if self._should_test_eval(
+                _n_selected, last_eval_step, n_features_to_select,
+                len(candidates) - i, test_eval_every_k,
+            ):
+                metrics, dt = self._run_test_eval(selected)
+                t_test_eval += dt
                 metrics["step"] = _n_selected
-                _last_eval_step = _n_selected
+                last_eval_step = _n_selected
                 performance_history.append(metrics)
 
                 if self._task_type == "classification":
-                    acc = metrics.get("accuracy", float("nan"))
                     logger.info(
                         "  Test eval step %d — accuracy: %.4f",
-                        len(selected), acc,
+                        _n_selected, metrics.get("accuracy", float("nan")),
                     )
                 else:
                     logger.info(
                         "  Test eval step %d — r2: %.4f",
-                        len(selected), metrics.get("r2", float("nan")),
+                        _n_selected, metrics.get("r2", float("nan")),
                     )
 
                 if stopping_metric is not None and stopping_threshold is not None:
@@ -726,6 +734,16 @@ class WrapperSelector:
             n_skipped,
         )
 
+        # Build short result label from flags
+        if self.use_su_ranking and self.use_mb_pruning:
+            _label = "IWSS-MB"
+        elif self.use_su_ranking:
+            _label = "IWSS"
+        elif self.use_mb_pruning:
+            _label = "SFS-MB"
+        else:
+            _label = "SFS"
+
         return WrapperSelectionResult(
             selected_features=selected,
             performance_history=performance_history,
@@ -735,6 +753,7 @@ class WrapperSelector:
             selection_time_seconds=self._filter_time_seconds + t_selection_loop,
             evaluation_time_seconds=t_test_eval if performance_history else None,
             task_type=self._task_type,
+            label=_label,
             filter_time_seconds=self._filter_time_seconds,
             classifier_time_seconds=t_classifier,
             test_evaluation_time_seconds=t_test_eval,

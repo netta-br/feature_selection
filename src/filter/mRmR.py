@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -9,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 from ..evaluation.logistic_regression import evaluate_logistic_regression_with_given_features
-from ..precomputation import FeatureCorrelationMatrix, FeatureRelevanceScores
+from ..score_calculator import ScoreCalculator, infer_task_type
+from ..score_matrix import ScoreMatrix
 from ..results import SelectionResult
 
 # ---------------------------------------------------------------------------
@@ -23,6 +25,21 @@ if not logger.handlers:
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     ))
     logger.addHandler(_h)
+
+
+# ---------------------------------------------------------------------------
+# Config loader helper
+# ---------------------------------------------------------------------------
+def _load_config() -> dict:
+    """Load project-wide config.json if it exists."""
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "config.json"
+    )
+    config_path = os.path.normpath(config_path)
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            return json.load(f)
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +75,10 @@ class mRmRSelector:
         Correlation method for feature→feature redundancy.
         One of ``'pearson'`` (default), ``'kendall'``, ``'spearman'``.
         Must equal ``relevance_method`` when the latter is correlation-based (R-10).
+    redundancy_agg : str
+        Aggregation for redundancy: ``'mean'`` or ``'max'``.
     correlation_filepath : str | None
-        Path to a pre-computed correlation matrix CSV.  For non-correlation
+        Path to a pre-computed correlation matrix file.  For non-correlation
         relevance methods this matrix is used for redundancy only.
     relevance_scores_filepath : str | None
         Path to a pre-computed relevance scores CSV (non-correlation methods).
@@ -89,6 +108,8 @@ class mRmRSelector:
         mrmr_score_method: str = "difference",
         # G4 — decoupled redundancy method
         redundancy_method: str = "pearson",
+        # redundancy aggregation
+        redundancy_agg: str = "mean",
         # existing params
         correlation_filepath: str | None = None,
         # G4 — non-correlation relevance scores filepath
@@ -124,6 +145,10 @@ class mRmRSelector:
                 "mrmr_score_method must be 'difference' or 'ratio'; "
                 f"got {mrmr_score_method!r}"
             )
+        if redundancy_agg not in {"mean", "max"}:
+            raise ValueError(
+                f"redundancy_agg must be 'mean' or 'max'; got {redundancy_agg!r}"
+            )
         if y_train.name is None:
             raise ValueError(
                 "y_train must have a .name (e.g. pd.Series(..., name='is_lumA')). "
@@ -135,6 +160,7 @@ class mRmRSelector:
         self.relevance_method = relevance_method
         self.mrmr_score_method = mrmr_score_method
         self.redundancy_method = redundancy_method
+        self.redundancy_agg = redundancy_agg
         self.correlation_filepath = correlation_filepath
         self.relevance_scores_filepath = relevance_scores_filepath
 
@@ -154,406 +180,152 @@ class mRmRSelector:
         # Target column name — always y_train.name, never a synthetic sentinel
         self._target_col: str = str(y_train.name)
 
-        self._task_type: str = self._detect_task_type()
+        self._task_type: str = infer_task_type(y_train.values)
 
-        # _score_arr  — (N+1)×(N+1) float64 array, NaN-filled until populated.
-        # _col_index  — {feature_name: int} for O(1) row/col lookup (no string hashing per access).
-        # _corr_bulk_done — True once the entire correlation matrix has been populated in one shot.
-        self._score_arr:      np.ndarray | None = None
-        self._col_index:      dict[str, int]    = {}
-        self._corr_bulk_done: bool              = False
+        # Load config for method_params
+        self._cfg = _load_config().get("score_matrix", {})
 
-        # non-correlation relevance score stores
-        self._relevance_scores: pd.Series | None = None   # Mode A: full precomputed Series
-        self._relevance_cache: dict | None = None         # Mode B: lazy hot-cache (random_forest bulk-inits all features on first call)
+        # ── New: ScoreCalculator / ScoreMatrix ─────────────────────────
+        self._calc: ScoreCalculator | None = None
+        self._sm: ScoreMatrix | None = None
 
         logger.info(
             "mRmRSelector initialised | task_type=%s | target_col=%s | "
-            "relevance_method=%s | redundancy_method=%s | mrmr_score_method=%s",
+            "relevance_method=%s | redundancy_method=%s | mrmr_score_method=%s | "
+            "redundancy_agg=%s",
             self._task_type,
             self._target_col,
             self.relevance_method,
             self.redundancy_method,
             self.mrmr_score_method,
+            self.redundancy_agg,
         )
 
     # ------------------------------------------------------------------
-    # Task-type detection
+    # Build ScoreCalculator / ScoreMatrix (replaces _precompute_matrix)
     # ------------------------------------------------------------------
-    def _detect_task_type(self) -> str:
-        if self.y_train.nunique() < 0.1 * len(self.y_train):
-            return "classification"
-        return "regression"
+    def _build_score_calculator(self) -> None:
+        """Build ScoreCalculator for Mode B, or ScoreMatrix for Mode A.
 
-    # ------------------------------------------------------------------
-    # Precomputation (Mode A)
-    # ------------------------------------------------------------------
-    def _precompute_matrix(self) -> None:
-        """Load or compute the correlation matrix used for redundancy (and relevance when
-        ``relevance_method`` is correlation-based)."""
-        if self.relevance_method in self._NON_CORR_METHODS:
-            # non-correlation: precompute relevance scores separately,
-            # and load/compute the redundancy-only correlation matrix.
-            self._precompute_relevance_scores()
-            self._precompute_redundancy_matrix()
-        else:
-            # combined [X ‖ y] matrix for both relevance and redundancy
-            self._precompute_combined_matrix()
-
-    def _precompute_combined_matrix(self) -> None:
-        """P0 path — combined correlation matrix for correlation-based relevance.
-
-        C3 (perf-refactor): loads the matrix directly into a NumPy array
-        (_score_arr) with a companion dict index (_col_index) instead of
-        keeping a pandas DataFrame.
+        For non-correlation relevance methods, builds two calculators:
+        one for relevance (target-based) and one for redundancy (correlation-based).
         """
-        if self.correlation_filepath is None:
-            self._score_arr = None
-            logger.info("No correlation filepath — lazy on-demand scoring active")
-            return
-
-        fcm = FeatureCorrelationMatrix()
-
-        if os.path.exists(self.correlation_filepath):
-            fcm.load_correlation_matrix(self.correlation_filepath)
-            df = fcm.correlation_matrix.abs()
-            logger.info(
-                "Loaded correlation matrix from %s %s",
-                self.correlation_filepath,
-                df.shape,
-            )
+        # Determine the effective method for the calculator.
+        # For correlation-based methods, one calculator handles both
+        # relevance and redundancy.
+        # For non-correlation methods, we need separate handling.
+        if self.relevance_method in self._CORR_METHODS:
+            effective_method = self.relevance_method
         else:
-            combined = pd.concat([self._X_filled, self.y_train], axis=1)
-            FeatureCorrelationMatrix.compute_correlation_matrix(
-                combined,
-                method=self.relevance_method,
+            # Non-correlation: redundancy uses redundancy_method (correlation)
+            # Relevance is computed separately.
+            effective_method = self.redundancy_method
+
+        self._calc = ScoreCalculator(
+            X=self._X_filled.values,
+            feature_names=list(self._X_filled.columns),
+            target_name=self._target_col,
+            target_col=self.y_train.values,
+            method=effective_method,
+            redundancy_agg=self.redundancy_agg,
+            method_params=self._cfg.get(effective_method, {}),
+            random_seed=self.random_seed,
+        )
+
+        if self.correlation_filepath is not None:
+            # Mode A — use ScoreMatrix for disk-backed precomputed matrix
+            self._sm = ScoreMatrix(
+                X=self._X_filled.values,
+                feature_names=list(self._X_filled.columns),
+                target_names=[self._target_col],
+                target_data=self.y_train.values[:, None],
+                method=effective_method,
                 filepath=self.correlation_filepath,
-            )
-            fcm.load_correlation_matrix(self.correlation_filepath)
-            df = fcm.correlation_matrix.abs()
-            logger.info(
-                "Computed and saved correlation matrix to %s %s",
-                self.correlation_filepath,
-                df.shape,
-            )
-
-        cols = list(df.columns)
-        self._col_index = {name: i for i, name in enumerate(cols)}
-        self._score_arr = df.values.copy()   # one-time O(N²) copy; plain float64 ndarray
-        self._corr_bulk_done = True          # fully populated — no lazy bulk-init needed
-
-        # Warn if the target column is missing (matrix was built from X only)
-        if self._target_col not in self._col_index:
-            logger.warning(
-                "Target column '%s' absent in loaded matrix — target relevance "
-                "will be computed lazily",
-                self._target_col,
-            )
-            # _score_arr NaN row/col for target is added by _lazy_init_matrix on first
-            # _get_score call; mark bulk as not done so per-pair fallback stays live.
-            self._corr_bulk_done = False
-
-    def _precompute_redundancy_matrix(self) -> None:
-        """G4 — load or compute the redundancy-only pairwise correlation matrix.
-
-        C4 (perf-refactor): same NumPy-backing swap as _precompute_combined_matrix.
-        """
-        if self.correlation_filepath is None:
-            self._score_arr = None
-            logger.info(
-                "No correlation filepath for redundancy — lazy on-demand scoring active"
-            )
-            return
-
-        fcm = FeatureCorrelationMatrix()
-
-        if os.path.exists(self.correlation_filepath):
-            fcm.load_correlation_matrix(self.correlation_filepath)
-            df = fcm.correlation_matrix.abs()
-            logger.info(
-                "Loaded redundancy matrix from %s %s",
-                self.correlation_filepath,
-                df.shape,
-            )
-        else:
-            FeatureCorrelationMatrix.compute_correlation_matrix(
-                self._X_filled,
-                method=self.redundancy_method,
-                filepath=self.correlation_filepath,
-            )
-            fcm.load_correlation_matrix(self.correlation_filepath)
-            df = fcm.correlation_matrix.abs()
-            logger.info(
-                "Computed and saved redundancy matrix to %s %s",
-                self.correlation_filepath,
-                df.shape,
-            )
-
-        cols = list(df.columns)
-        self._col_index = {name: i for i, name in enumerate(cols)}
-        self._score_arr = df.values.copy()
-        self._corr_bulk_done = True   # fully populated; no bulk re-init needed
-
-    def _precompute_relevance_scores(self) -> None:
-        """G4 Mode A — precompute/load relevance scores from file."""
-        if self.relevance_scores_filepath is None:
-            # Mode B — lazy hot-cache; initialise container if needed
-            if self._relevance_cache is None:
-                self._relevance_cache = {}
-            logger.info(
-                "No relevance_scores_filepath — lazy per-feature relevance computation active"
-            )
-            return
-
-        frs = FeatureRelevanceScores()
-
-        if os.path.exists(self.relevance_scores_filepath):
-            frs.load_relevance_scores(self.relevance_scores_filepath)
-            self._relevance_scores = frs.relevance_scores
-            logger.info(
-                "Loaded relevance scores from %s (%d features)",
-                self.relevance_scores_filepath,
-                len(self._relevance_scores),
-            )
-        else:
-            FeatureRelevanceScores.compute_relevance_scores(
-                X=self._X_filled,
-                y=self.y_train,
-                method=self.relevance_method,
-                task_type=self._task_type,
-                filepath=self.relevance_scores_filepath,
+                file_format=self._cfg.get("file_format", "csv"),
+                method_params=self._cfg.get(effective_method, {}),
                 random_seed=self.random_seed,
             )
-            frs.load_relevance_scores(self.relevance_scores_filepath)
-            self._relevance_scores = frs.relevance_scores
+            self._sm.precompute()
+
+            # For Mode A, populate relevance from the precomputed matrix
+            target_idx = self._sm.index[self._target_col]
+            feat_names = list(self._X_filled.columns)
+            feat_idxs = np.array(
+                [self._sm.index[f] for f in feat_names], dtype=np.intp
+            )
+            relevance_from_matrix = self._sm.arr[target_idx, feat_idxs]
+
+            # Store in calc's _relevance_vec for uniform API
+            self._calc._relevance_vec = relevance_from_matrix.copy()
+            self._calc._redundancy_acc = np.zeros(self._calc._N, dtype=np.float64)
+            self._calc._n_selected = 0
+
+            # For non-correlation relevance: override relevance vector
+            if self.relevance_method in self._NON_CORR_METHODS:
+                self._compute_noncorr_relevance()
+
+            logger.info("Mode A: ScoreMatrix precomputed from %s", self.correlation_filepath)
+        else:
+            # Mode B — single-target calculator only
+            self._calc.init_target()
+
+            # For non-correlation relevance: override relevance vector
+            if self.relevance_method in self._NON_CORR_METHODS:
+                self._compute_noncorr_relevance()
+
+            logger.info("Mode B: ScoreCalculator initialised (accumulator pattern)")
+
+    # ------------------------------------------------------------------
+    # Non-correlation relevance override
+    # ------------------------------------------------------------------
+    def _compute_noncorr_relevance(self) -> None:
+        """Compute relevance using non-correlation method and override _relevance_vec."""
+        if self.relevance_scores_filepath is not None and os.path.exists(
+            self.relevance_scores_filepath
+        ):
+            # Load from file
+            series = pd.read_csv(
+                self.relevance_scores_filepath, index_col=0
+            ).squeeze("columns")
+            feat_names = list(self._X_filled.columns)
+            relevance = np.array(
+                [float(series.get(f, 0.0)) for f in feat_names], dtype=np.float64
+            )
+            self._calc._relevance_vec = relevance
             logger.info(
-                "Computed and saved relevance scores to %s",
+                "Loaded non-correlation relevance from %s",
                 self.relevance_scores_filepath,
             )
+            return
 
-    # ------------------------------------------------------------------
-    # NumPy-backed score matrix init (replaces pandas DataFrame)
-    # ------------------------------------------------------------------
-    def _lazy_init_matrix(self) -> None:
-        """Initialise the NumPy score array to NaN on first Mode-B access.
-
-        Builds _col_index (name→int) and allocates _score_arr ((N+1)×(N+1))
-        with diagonal = 1.0.  Called at most once per selector instance.
-        """
-        cols = list(self._X_filled.columns) + [self._target_col]
-        n = len(cols)
-        self._col_index = {name: i for i, name in enumerate(cols)}
-        self._score_arr = np.full((n, n), np.nan, dtype=np.float64)
-        np.fill_diagonal(self._score_arr, 1.0)
-
-    # ------------------------------------------------------------------
-    #  Unified score access (correlation matrix) with bulk-init trigger
-    # ------------------------------------------------------------------
-    def _compute_raw_score(self, col_a: str, col_b: str, method: str | None = None) -> float:
-        """Compute absolute correlation between two columns (or target).
-
-        C5 (perf-refactor / B2): on the first Mode-B miss for a correlation
-        method, bulk-initialises the entire (_score_arr) matrix via
-        np.corrcoef / DataFrame.corr (a single BLAS/scipy call) before
-        returning.  Subsequent calls read directly from the populated array
-        through _get_score; this fallback fires only for columns absent from
-        the bulk matrix (rare/degenerate case).
-        """
-        _method = method if method is not None else self.relevance_method
-
-        # Bulk-init on first miss (Mode B, correlation methods only)
-        if not self._corr_bulk_done and _method in self._CORR_METHODS:
-            self._bulk_init_corr_matrix(_method)
-            i = self._col_index.get(col_a)
-            j = self._col_index.get(col_b)
-            if i is not None and j is not None and not np.isnan(self._score_arr[i, j]):
-                return float(self._score_arr[i, j])
-
-        # Per-pair fallback (unknown column, or bulk already done + NaN entry)
-        series_a = (
-            self.y_train if col_a == self._target_col else self._X_filled[col_a]
+        # Compute using a temporary ScoreCalculator with the non-corr method
+        rel_calc = ScoreCalculator(
+            X=self._X_filled.values,
+            feature_names=list(self._X_filled.columns),
+            target_name=self._target_col,
+            target_col=self.y_train.values,
+            method=self.relevance_method,
+            method_params=self._cfg.get(self.relevance_method, {}),
+            random_seed=self.random_seed,
         )
-        series_b = (
-            self.y_train if col_b == self._target_col else self._X_filled[col_b]
-        )
-        if series_a.std() == 0 or series_b.std() == 0:
-            return 0.0
-        r = series_a.corr(series_b, method=_method)
-        return 0.0 if pd.isna(r) else abs(r)
+        rel_calc.init_target()
+        self._calc._relevance_vec = rel_calc._relevance_vec.copy()
 
-    # ------------------------------------------------------------------
-    # Bulk correlation matrix init (one BLAS/scipy call, Mode B)
-    # ------------------------------------------------------------------
-    def _bulk_init_corr_matrix(self, method: str) -> None:
-        """Bulk-compute the full correlation matrix in one BLAS/C call (Mode B).
-
-        Uses np.corrcoef for Pearson (single BLAS dgemm) or DataFrame.corr for
-        Kendall/Spearman (scipy under the hood).  Writes absolute values into
-        NaN slots of _score_arr, preserving any previously hand-computed entries.
-        Sets _corr_bulk_done = True so this path is never entered again.
-        """
-        if self._score_arr is None:
-            self._lazy_init_matrix()
-
-        combined = pd.concat([self._X_filled, self.y_train], axis=1)
-
-        if method == "pearson":
-            raw = np.corrcoef(combined.values.T)          # single BLAS dgemm
-        else:
-            raw = combined.corr(method=method).values      # Kendall/Spearman via scipy
-
-        np.abs(raw, out=raw)
-        np.nan_to_num(raw, nan=0.0, copy=False)
-        np.fill_diagonal(raw, 1.0)
-
-        # Write only into NaN slots (preserves any previously computed values)
-        mask = np.isnan(self._score_arr)
-        self._score_arr[mask] = raw[mask]
-
-        self._corr_bulk_done = True
-        logger.info(
-            "Bulk correlation init complete (%s, %d×%d)",
-            method, raw.shape[0], raw.shape[1],
-        )
-
-    # ------------------------------------------------------------------
-    # Cached score access (uses _score_arr; no per-miss logging)
-    # ------------------------------------------------------------------
-    def _get_score(self, col_a: str, col_b: str, method: str | None = None) -> float:
-        """Return cached absolute correlation; compute and cache on miss.
-        integer indexing into _score_arr. 
-        """
-        if self._score_arr is None:
-            self._lazy_init_matrix()
-
-        i = self._col_index.get(col_a)
-        j = self._col_index.get(col_b)
-        if i is None or j is None:
-            logger.warning(
-                "Feature not found in score matrix: ('%s', '%s') — computing live",
-                col_a, col_b,
+        # Save if filepath provided
+        if self.relevance_scores_filepath is not None:
+            feat_names = list(self._X_filled.columns)
+            series = pd.Series(
+                self._calc._relevance_vec, index=feat_names, name="score"
             )
-            return self._compute_raw_score(col_a, col_b, method=method)
-
-        val = self._score_arr[i, j]
-        if not np.isnan(val):
-            return float(val)
-
-        # Cache miss
-        raw = self._compute_raw_score(col_a, col_b, method=method)
-        self._score_arr[i, j] = raw
-        self._score_arr[j, i] = raw
-        return raw
-
-    # ------------------------------------------------------------------
-    # single-feature lazy relevance computation (Mode B)
-    # ------------------------------------------------------------------
-    def _compute_raw_relevance(self, feature: str) -> float:
-        """Compute relevance score for a single feature using the non-correlation method.
-
-        C9 (perf-refactor / B3): MI and F-stat branches now bulk-initialise the
-        entire _relevance_cache in one sklearn call on the first miss, matching
-        the existing RF pattern.  This reduces KD-tree builds from O(F) to O(1).
-
-        Used only in Mode B (no ``relevance_scores_filepath``).
-        """
-        from sklearn.feature_selection import (
-            mutual_info_classif,
-            mutual_info_regression,
-            f_classif,
-            f_regression,
-        )
-        from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-
-        y = self.y_train
-
-        if self.relevance_method == "mutual_information":
-            fn = (
-                mutual_info_classif
-                if self._task_type == "classification"
-                else mutual_info_regression
+            series.index.name = "feature"
+            dirpath = os.path.dirname(self.relevance_scores_filepath)
+            if dirpath:
+                os.makedirs(dirpath, exist_ok=True)
+            series.to_csv(self.relevance_scores_filepath, header=True)
+            logger.info(
+                "Computed and saved non-correlation relevance to %s",
+                self.relevance_scores_filepath,
             )
-            # Bulk-init: one KD-tree build across all features
-            scores = fn(self._X_filled.values, y.values, random_state=self.random_seed)
-            for feat, sc in zip(self._X_filled.columns, scores):
-                self._relevance_cache[feat] = 0.0 if (np.isnan(sc) or np.isinf(sc)) else float(sc)
-            return self._relevance_cache.get(feature, 0.0)
-
-        elif self.relevance_method == "f_statistic":
-            fn = f_classif if self._task_type == "classification" else f_regression
-            # Bulk-init: one ANOVA pass across all features
-            f_scores, _ = fn(self._X_filled.values, y.values)
-            for feat, sc in zip(self._X_filled.columns, f_scores):
-                self._relevance_cache[feat] = 0.0 if (np.isnan(sc) or np.isinf(sc)) else float(sc)
-            return self._relevance_cache.get(feature, 0.0)
-
-        elif self.relevance_method == "random_forest":
-            Cls = (
-                RandomForestClassifier
-                if self._task_type == "classification"
-                else RandomForestRegressor
-            )
-            rf = Cls(n_estimators=100, random_state=self.random_seed)
-            # Fit once on the full feature matrix and populate the entire cache.
-            rf.fit(self._X_filled, y)
-            importances = rf.feature_importances_
-            for feat, imp in zip(self._X_filled.columns, importances):
-                self._relevance_cache[feat] = (
-                    0.0 if (np.isnan(imp) or np.isinf(imp)) else float(imp)
-                )
-            return self._relevance_cache.get(feature, 0.0)
-
-        else:
-            raise ValueError(
-                f"_compute_raw_relevance called with correlation method {self.relevance_method!r}"
-            )
-
-    # ------------------------------------------------------------------
-    # relevance dispatch
-    # ------------------------------------------------------------------
-    def _get_relevance(self, feature: str) -> float:
-        if self.relevance_method in self._CORR_METHODS:
-            # target column in combined matrix
-            return self._get_score(feature, self._target_col)
-
-        # Non-correlation path
-        if self._relevance_scores is not None:
-            # Mode A: fully populated Series
-            return float(self._relevance_scores.get(feature, 0.0))
-
-        # Mode B: lazy hot-cache
-        if self._relevance_cache is None:
-            self._relevance_cache = {}
-        if feature not in self._relevance_cache:
-            self._relevance_cache[feature] = self._compute_raw_relevance(feature)
-        return self._relevance_cache[feature]
-
-    # ------------------------------------------------------------------
-    #=redundancy with NumPy row-slice (replaces Python loop + .loc)
-    # ------------------------------------------------------------------
-    def _get_redundancy(self, candidate: str, selected: list[str]) -> float:
-        """Return mean absolute correlation between candidate and all selected features.
-
-        C8 (perf-refactor / B1): replaces the Python-loop + pandas .loc slice
-        with a single NumPy fancy-index mean over a pre-populated row of
-        _score_arr.  No per-candidate or per-pair logging.
-        """
-        if not selected:
-            return 0.0
-        if self._score_arr is None:
-            self._lazy_init_matrix()
-
-        i = self._col_index[candidate]
-        col_idxs = np.array([self._col_index[s] for s in selected], dtype=np.intp)
-
-        # Fill any NaN slots silently (bulk-init fires on first miss via _compute_raw_score)
-        for k, s in zip(col_idxs.tolist(), selected):
-            if np.isnan(self._score_arr[i, k]):
-                raw = self._compute_raw_score(candidate, s, method=self.redundancy_method)
-                self._score_arr[i, k] = raw
-                self._score_arr[k, i] = raw
-
-        return float(self._score_arr[i, col_idxs].mean())
 
     # ------------------------------------------------------------------
     # mRmR score
@@ -626,22 +398,26 @@ class mRmRSelector:
         if eval_every_k < 1:
             raise ValueError(f"eval_every_k must be >= 1; got {eval_every_k}")
 
-        # ── PRE-SELECTION (not timed) ──────────────────────────────────
-        self._precompute_matrix()
+        # ── PRE-SELECTION (timed) ──────────────────────────────────────
+        t_pre = perf_counter()
+        self._build_score_calculator()
+        t_precompute = perf_counter() - t_pre
         logger.info(
-            "Starting forward selection for up to %d features (eval_every_k=%d)",
+            "Starting forward selection for up to %d features (eval_every_k=%d, precompute=%.3fs)",
             n_features_to_select,
             eval_every_k,
+            t_precompute,
         )
 
-        # ── SELECTION LOOP ─────────────────────────────────────────────
+        # ── SELECTION LOOP — accumulator pattern ───────────────────────
+        N_features = self._calc._N
+        feat_names = list(self._X_filled.columns)
+
         selected: list[str] = []
-        # separate list (stable iteration order) and
-        # set (O(1) membership test + removal) instead of a single list with
-        # O(F) list.remove() each step.
-        _unselected_list: list[str] = list(self.X_train.columns)
-        _unselected_set:  set[str]  = set(_unselected_list)
-        t_select: float = 0.0
+        selected_idxs: list[int] = []
+        remaining_idxs = np.arange(N_features, dtype=np.intp)
+
+        t_select: float = t_precompute
         t_eval: float = 0.0
         stopping_reason: str | None = None
         performance_history: list[dict] = []
@@ -660,35 +436,44 @@ class mRmRSelector:
 
         for step in range(n_features_to_select):
             # (a) All features already selected?
-            if not _unselected_set:
+            if len(remaining_idxs) == 0:
                 stopping_reason = "no_features_remaining"
                 logger.info("No features remaining — stopping at step %d", step)
                 break
 
             # (b) TIMED: mRmR scoring + best-feature selection
             t0 = perf_counter()
-            scores = {
-                c: self._compute_mrmr_score(
-                    self._get_relevance(c),
-                    self._get_redundancy(c, selected),
-                )
-                for c in _unselected_list
-                if c in _unselected_set   # O(1) set membership; skips already-selected
-            }
-            best = max(scores, key=scores.__getitem__)
-            selected.append(best)
-            _unselected_set.discard(best)   # O(1) removal
+
+            rel = self._calc.get_relevance(remaining_idxs)
+            red = self._calc.get_redundancy(remaining_idxs)
+
+            if self.mrmr_score_method == "difference":
+                scores = rel - red
+            else:
+                scores = rel / (red + 1e-8)
+
+            best_local = int(np.argmax(scores))
+            best_idx = remaining_idxs[best_local]
+
+            # Remove best from remaining
+            remaining_idxs = np.delete(remaining_idxs, best_local)
+
+            # Update redundancy accumulator
+            self._calc.update_redundancy(best_idx, remaining_idxs)
+
+            selected_idxs.append(int(best_idx))
+            selected.append(feat_names[best_idx])
             t_select += perf_counter() - t0
 
             logger.info(
-                "Step %d: selected '%s' (%d total)", step + 1, best, len(selected)
+                "Step %d: selected '%s' (%d total)", step + 1, feat_names[best_idx], len(selected)
             )
 
             # (c) G1 — evaluation predicate
             _should_eval = _eval_enabled and (
                 (step + 1) % eval_every_k == 0          # every k-th step
                 or (step + 1) == n_features_to_select   # always on final requested step
-                or not _unselected_set                   # always on forced-final step
+                or len(remaining_idxs) == 0              # always on forced-final step
             )
 
             if _should_eval:
@@ -752,6 +537,15 @@ class mRmRSelector:
         if _eval_enabled:
             logger.info("Evaluation time: %.3fs", t_eval)
 
+        # Build short label: method abbreviation + score method + agg (if non-default)
+        _rel_abbrev = {
+            "pearson": "P", "kendall": "K", "spearman": "S",
+            "mutual_information": "MI", "random_forest": "RF", "f_statistic": "FS",
+        }.get(self.relevance_method, self.relevance_method)
+        _score_abbrev = "D" if self.mrmr_score_method == "difference" else "R"
+        _agg_suffix = f"-{self.redundancy_agg}" if self.redundancy_agg != "mean" else ""
+        _label = f"mRmR-{_rel_abbrev}-{_score_abbrev}-{_agg_suffix}"
+
         return SelectionResult(
             selected_features=selected,
             performance_history=performance_history,
@@ -761,6 +555,7 @@ class mRmRSelector:
             selection_time_seconds=t_select,
             evaluation_time_seconds=t_eval if _eval_enabled else None,
             task_type=self._task_type,
+            label=_label,
         )
 
     # ------------------------------------------------------------------
