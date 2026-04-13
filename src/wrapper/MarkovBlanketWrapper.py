@@ -61,6 +61,12 @@ class WrapperSelector:
     use_mb_pruning : bool
         If ``True``, apply vectorised Approximate Markov Blanket pruning
         after each feature is accepted (Definition 5, Wang et al.).
+    mb_threshold : float
+        Margin added to the MB redundancy condition.  A candidate ``F_j``
+        is pruned only when ``SU(F_i, F_j) - SU(F_j, C) > mb_threshold``
+        (in addition to ``SU(F_i, C) >= SU(F_j, C)``).  Default ``0.0``
+        reproduces the original Definition 5; positive values make pruning
+        more conservative (fewer candidates pruned).
     evaluator : sklearn-compatible estimator or None
         Duck-typed ``fit`` / ``predict`` estimator.  Defaults to
         ``LogisticRegression(max_iter=1000, C=np.inf)`` for classification
@@ -92,6 +98,7 @@ class WrapperSelector:
         y_val: pd.Series,
         use_su_ranking: bool = True,
         use_mb_pruning: bool = True,
+        mb_threshold: float = 0.0,
         evaluator=None,
         min_features: int = 1,
         cv_folds: int = 5,
@@ -108,6 +115,7 @@ class WrapperSelector:
 
         self.use_su_ranking = use_su_ranking
         self.use_mb_pruning = use_mb_pruning
+        self.mb_threshold = mb_threshold
         self.min_features = min_features
         self.cv_folds = cv_folds
         self.cv_min_folds = cv_min_folds
@@ -149,11 +157,12 @@ class WrapperSelector:
 
         logger.info(
             "WrapperSelector initialised | task=%s | use_su_ranking=%s | "
-            "use_mb_pruning=%s | cv_folds=%d | cv_min_folds=%d | "
-            "patience=%s | n_candidates=%d",
+            "use_mb_pruning=%s | mb_threshold=%.4f | cv_folds=%d | "
+            "cv_min_folds=%d | patience=%s | n_candidates=%d",
             self._task_type,
             use_su_ranking,
             use_mb_pruning,
+            mb_threshold,
             cv_folds,
             cv_min_folds,
             patience,
@@ -278,7 +287,7 @@ class WrapperSelector:
             # Mode B: compute on-the-fly
             su_sel_cand = self._calc.compute_row(sel_idx, cand_idxs)
 
-        redundant_mask = (su_sel_C >= su_cand_C) & (su_sel_cand > su_cand_C)
+        redundant_mask = (su_sel_C >= su_cand_C) & (su_sel_cand - su_cand_C > self.mb_threshold)
 
         pruned: list[str] = []
         surviving: list[str] = []
