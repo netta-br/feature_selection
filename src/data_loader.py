@@ -74,7 +74,7 @@ class DataLoader:
         # ------------------------------------------------------------------
         # 2 / 3. Auto-transpose detection or ID-column handling
         # ------------------------------------------------------------------
-        if self.auto_transpose and df.shape[0] < df.shape[1]:
+        if self.auto_transpose and df.shape[1] < df.shape[0]:
             # First column contains feature/gene names (row identifiers)
             df.set_index(df.columns[0], inplace=True)
             df = df.T
