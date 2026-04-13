@@ -623,6 +623,37 @@ class WrapperSelector:
                         len(selected), feat, mean_s, n_imp,
                     )
 
+                    # ── Test/validation evaluation ─────────────────────────
+                    _n_selected = len(selected)
+                    if self._should_test_eval(
+                        _n_selected, last_eval_step, n_features_to_select,
+                        len(candidates) - i, test_eval_every_k,
+                    ):
+                        metrics, dt = self._run_test_eval(selected)
+                        t_test_eval += dt
+                        metrics["step"] = _n_selected
+                        last_eval_step = _n_selected
+                        performance_history.append(metrics)
+
+                        if self._task_type == "classification":
+                            logger.info(
+                                "  Test eval step %d — accuracy: %.4f",
+                                _n_selected, metrics.get("accuracy", float("nan")),
+                            )
+                        else:
+                            logger.info(
+                                "  Test eval step %d — r2: %.4f",
+                                _n_selected, metrics.get("r2", float("nan")),
+                            )
+
+                        if stopping_metric is not None and stopping_threshold is not None:
+                            if (
+                                self._resolve_metric(metrics, stopping_metric)
+                                >= stopping_threshold
+                            ):
+                                stopping_reason = "metric_threshold_reached"
+                                break
+
                     if self.use_mb_pruning:
                         candidates, np_ = self._prune_candidates(candidates, feat, i)
                         n_pruned += np_
@@ -680,43 +711,43 @@ class WrapperSelector:
                     len(selected), best, best_mean,
                 )
 
+                # ── Test/validation evaluation ─────────────────────────
+                _n_selected = len(selected)
+                if self._should_test_eval(
+                    _n_selected, last_eval_step, n_features_to_select,
+                    len(candidates) - i, test_eval_every_k,
+                ):
+                    metrics, dt = self._run_test_eval(selected)
+                    t_test_eval += dt
+                    metrics["step"] = _n_selected
+                    last_eval_step = _n_selected
+                    performance_history.append(metrics)
+
+                    if self._task_type == "classification":
+                        logger.info(
+                            "  Test eval step %d — accuracy: %.4f",
+                            _n_selected, metrics.get("accuracy", float("nan")),
+                        )
+                    else:
+                        logger.info(
+                            "  Test eval step %d — r2: %.4f",
+                            _n_selected, metrics.get("r2", float("nan")),
+                        )
+
+                    if stopping_metric is not None and stopping_threshold is not None:
+                        if (
+                            self._resolve_metric(metrics, stopping_metric)
+                            >= stopping_threshold
+                        ):
+                            stopping_reason = "metric_threshold_reached"
+                            break
+
                 if self.use_mb_pruning:
                     candidates, np_ = self._prune_candidates(candidates, best, i)
                     n_pruned += np_
                     n_skipped += np_
                     if np_:
                         logger.info("  MB pruned %d candidates", np_)
-
-            # ── Test/validation evaluation (OUTSIDE timed loop) ───────
-            _n_selected = len(selected)
-            if self._should_test_eval(
-                _n_selected, last_eval_step, n_features_to_select,
-                len(candidates) - i, test_eval_every_k,
-            ):
-                metrics, dt = self._run_test_eval(selected)
-                t_test_eval += dt
-                metrics["step"] = _n_selected
-                last_eval_step = _n_selected
-                performance_history.append(metrics)
-
-                if self._task_type == "classification":
-                    logger.info(
-                        "  Test eval step %d — accuracy: %.4f",
-                        _n_selected, metrics.get("accuracy", float("nan")),
-                    )
-                else:
-                    logger.info(
-                        "  Test eval step %d — r2: %.4f",
-                        _n_selected, metrics.get("r2", float("nan")),
-                    )
-
-                if stopping_metric is not None and stopping_threshold is not None:
-                    if (
-                        self._resolve_metric(metrics, stopping_metric)
-                        >= stopping_threshold
-                    ):
-                        stopping_reason = "metric_threshold_reached"
-                        break
 
         # ── STOP selection timer ───────────────────────────────────────
         t_selection_loop = perf_counter() - t0_selection

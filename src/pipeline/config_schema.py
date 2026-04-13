@@ -27,6 +27,7 @@ class PreprocessingConfig:
     train_pct: float = 0.7
     val_pct: float = 0.1
     test_pct: float = 0.2
+    eval_data_source: str = "validation"  # "validation" or "test"
 
 
 @dataclass
@@ -112,6 +113,12 @@ def validate_config(config: PipelineConfig) -> list[str]:
     if abs(pct_sum - 1.0) > 0.01:
         errors.append(
             f"preprocessing percentages must sum to 1.0 (got {pct_sum:.4f})."
+        )
+
+    if config.preprocessing.eval_data_source not in ("validation", "test"):
+        errors.append(
+            f"preprocessing.eval_data_source must be 'validation' or 'test' "
+            f"(got '{config.preprocessing.eval_data_source}')."
         )
 
     # --- targets ---

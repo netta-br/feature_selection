@@ -211,8 +211,8 @@ class Pipeline:
                 baseline_summary = plot_performance_with_stats(
                     self._data.X_train,
                     target_data.y_train,
-                    self._data.X_val,
-                    target_data.y_val,
+                    self._data.X_test if self.config.preprocessing.eval_data_source == "test" else self._data.X_val,
+                    target_data.y_test if self.config.preprocessing.eval_data_source == "test" else target_data.y_val,
                     N_values=N_values,
                     random_seed=self.config.preprocessing.random_seed,
                     num_runs=self.config.baseline.num_runs,
@@ -226,8 +226,8 @@ class Pipeline:
                 baseline_summary = reg_baseline(
                     self._data.X_train,
                     target_data.y_train,
-                    self._data.X_val,
-                    target_data.y_val,
+                    self._data.X_test if self.config.preprocessing.eval_data_source == "test" else self._data.X_val,
+                    target_data.y_test if self.config.preprocessing.eval_data_source == "test" else target_data.y_val,
                     N_values=N_values,
                     random_seed=self.config.preprocessing.random_seed,
                     num_runs=self.config.baseline.num_runs,
@@ -304,8 +304,8 @@ class Pipeline:
             correlation_filepath=params.get("correlation_filepath"),
             relevance_scores_filepath=params.get("relevance_scores_filepath"),
             random_seed=self.config.preprocessing.random_seed,
-            X_val=self._data.X_val,
-            y_val=target_data.y_val,
+            X_val=self._data.X_test if self.config.preprocessing.eval_data_source == "test" else self._data.X_val,
+            y_val=target_data.y_test if self.config.preprocessing.eval_data_source == "test" else target_data.y_val,
         )
 
         return sel.forward_selection(
@@ -329,8 +329,8 @@ class Pipeline:
         sel = WrapperSelector(
             X_train=self._data.X_train,
             y_train=target_data.y_train,
-            X_val=self._data.X_val,
-            y_val=target_data.y_val,
+            X_val=self._data.X_test if self.config.preprocessing.eval_data_source == "test" else self._data.X_val,
+            y_val=target_data.y_test if self.config.preprocessing.eval_data_source == "test" else target_data.y_val,
             use_su_ranking=params.get("use_su_ranking", True),
             use_mb_pruning=params.get("use_mb_pruning", True),
             mb_threshold=params.get("mb_threshold", 0.0),

@@ -95,7 +95,7 @@ def _build_header(config: "PipelineConfig", output_dir: str) -> "pn.pane.HTML":
         <h1 style="margin: 0 0 10px 0; color: #00d4ff; font-size: 1.8em;">
             🔬 Feature Selection Dashboard
         </h1>
-        <table style="border-collapse: collapse; color: #c0c0c0; font-size: 0.95em;">
+        <table style="border-collapse: collapse; color: #c0c0c0; font-size: 1.05em;">
             <tr><td style="padding: 3px 15px 3px 0; font-weight: bold;">Run</td>
                 <td>{timestamp_str}</td></tr>
             <tr><td style="padding: 3px 15px 3px 0; font-weight: bold;">Output</td>
@@ -107,6 +107,8 @@ def _build_header(config: "PipelineConfig", output_dir: str) -> "pn.pane.HTML":
             <tr><td style="padding: 3px 15px 3px 0; font-weight: bold;">Data</td>
                 <td>features: <code>{config.data.features_path}</code>,
                     labels: <code>{config.data.labels_path}</code></td></tr>
+            <tr><td style="padding: 3px 15px 3px 0; font-weight: bold;">Eval Data</td>
+                <td>{config.preprocessing.eval_data_source}</td></tr>
         </table>
     </div>
     """
@@ -221,8 +223,15 @@ def _build_performance_plots(
         if legend_items:
             legend = Legend(items=legend_items, location="top_left")
             legend.click_policy = "hide"
-            legend.label_text_font_size = "9pt"
+            legend.label_text_font_size = "11pt"
             p.add_layout(legend, "right")
+
+        # Font sizes for Bokeh figures
+        p.title.text_font_size = "13pt"
+        p.xaxis.axis_label_text_font_size = "12pt"
+        p.yaxis.axis_label_text_font_size = "12pt"
+        p.xaxis.major_label_text_font_size = "11pt"
+        p.yaxis.major_label_text_font_size = "11pt"
 
         p.xaxis.minor_tick_line_color = None
         p.grid.grid_line_alpha = 0.4
@@ -258,7 +267,7 @@ def _build_metrics_table(
     html = f"""
     <div style="margin: 10px 0;">
         <h3 style="margin-bottom: 8px;">📊 Final Metrics Summary</h3>
-        <table style="border-collapse: collapse; width: 100%; font-size: 0.9em;">
+        <table style="border-collapse: collapse; width: 100%; font-size: 1.0em;">
             <thead>
                 <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
                     <th style="padding: 6px 10px; text-align: left;">Selector</th>
@@ -285,6 +294,7 @@ def _build_metrics_table(
 
 def _build_selector_details(
     target_results: dict[str, "SelectionResult"],
+    config: "PipelineConfig",
 ) -> "pn.Accordion":
     """Build accordion with per-selector detail panels."""
     from ..results import WrapperSelectionResult
@@ -296,6 +306,21 @@ def _build_selector_details(
         features_list = "".join(
             f"<li>{feat}</li>" for feat in result.selected_features
         )
+
+        # Configuration section (from pipeline config)
+        config_section = ""
+        sel_cfg = next((s for s in config.selectors if s.label == label), None)
+        if sel_cfg:
+            params_rows = "".join(
+                f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in sel_cfg.params.items()
+            )
+            config_section = f"""
+            <h4 style="margin: 10px 0 5px 0;">⚙ Configuration</h4>
+            <table style="border-collapse: collapse; font-size: 1.0em;">
+                <tr><td>Type</td><td>{sel_cfg.type}</td></tr>
+                {params_rows}
+            </table>
+            """
 
         timing_rows = f"""
         <tr><td>Selection time</td><td>{result.selection_time_seconds:.3f}s</td></tr>
@@ -314,7 +339,7 @@ def _build_selector_details(
             """
             wrapper_section = f"""
             <h4 style="margin: 10px 0 5px 0;">🔧 Wrapper Statistics</h4>
-            <table style="border-collapse: collapse; font-size: 0.9em;">
+            <table style="border-collapse: collapse; font-size: 1.0em;">
                 <tr><td style="padding: 3px 10px;">Wrapper evaluations</td>
                     <td style="padding: 3px 10px;">{result.n_wrapper_evaluations}</td></tr>
                 <tr><td style="padding: 3px 10px;">Candidates pruned</td>
@@ -327,11 +352,12 @@ def _build_selector_details(
         html = f"""
         <div style="padding: 10px;">
             <h4 style="margin: 0 0 5px 0;">📋 Selected Features ({len(result.selected_features)})</h4>
-            <ol style="margin: 0; padding-left: 25px; font-size: 0.9em; columns: 2;">
+            <ol style="margin: 0; padding-left: 25px; font-size: 1.0em; columns: 2;">
                 {features_list}
             </ol>
+            {config_section}
             <h4 style="margin: 10px 0 5px 0;">⏱ Timing Breakdown</h4>
-            <table style="border-collapse: collapse; font-size: 0.9em;">
+            <table style="border-collapse: collapse; font-size: 1.0em;">
                 {timing_rows}
             </table>
             {wrapper_section}
@@ -355,11 +381,12 @@ def _build_target_tab(
     task_type: str,
     target_results: dict[str, "SelectionResult"],
     baseline: pd.DataFrame | None,
+    config: "PipelineConfig",
 ) -> "pn.Column":
     """Build a complete tab for one target variable."""
     perf_plots = _build_performance_plots(target_results, task_type, baseline)
     metrics_table = _build_metrics_table(target_results, task_type)
-    selector_details = _build_selector_details(target_results)
+    selector_details = _build_selector_details(target_results, config)
 
     return pn.Column(
         pn.pane.HTML(
@@ -508,12 +535,12 @@ def _build_feature_diff_table(
 
     html = f"""
     <div style="margin: 10px 0;">
-        <p style="font-size: 0.9em; margin-bottom: 5px;">
+        <p style="font-size: 1.0em; margin-bottom: 5px;">
             Shared: <strong>{len(both)}</strong> &nbsp;|&nbsp;
             Only in {label_a}: <strong>{len(only_a)}</strong> &nbsp;|&nbsp;
             Only in {label_b}: <strong>{len(only_b)}</strong>
         </p>
-        <table style="border-collapse: collapse; font-size: 0.85em;">
+        <table style="border-collapse: collapse; font-size: 0.95em;">
             <thead>
                 <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
                     <th style="padding: 5px 8px;">Rank</th>
@@ -523,7 +550,7 @@ def _build_feature_diff_table(
             </thead>
             <tbody>{''.join(rows_html)}</tbody>
         </table>
-        <p style="font-size: 0.8em; margin-top: 5px; color: #666;">
+        <p style="font-size: 0.9em; margin-top: 5px; color: #666;">
             🟩 same rank &nbsp; 🟨 different rank &nbsp; 🟥 one result only
         </p>
     </div>
@@ -538,7 +565,7 @@ def _dataframe_to_html(df: pd.DataFrame, title: str) -> "pn.pane.HTML":
     <div style="margin: 10px 0;">
         <style>
             .summary-table {{
-                border-collapse: collapse; width: 100%; font-size: 0.85em;
+                border-collapse: collapse; width: 100%; font-size: 0.95em;
             }}
             .summary-table th {{
                 background: #f0f0f0; padding: 5px 10px; text-align: left;
@@ -561,35 +588,41 @@ def _dataframe_to_html(df: pd.DataFrame, title: str) -> "pn.pane.HTML":
 def _build_timing_overview(
     results: dict[str, "SelectionResult"],
 ) -> "pn.pane.Bokeh":
-    """Build a horizontal bar chart ranking selectors by total selection time."""
+    """Build a horizontal bar chart ranking selectors by time per feature."""
     if not results:
         return pn.pane.Bokeh(figure(title="No results"), sizing_mode="stretch_width")
 
     # Collect timing data
-    entries: list[tuple[str, float, str]] = []
+    entries: list[tuple[str, float, float, int, str]] = []
     for key, result in results.items():
         selector_type = "wrapper" if hasattr(result, "filter_time_seconds") and result.filter_time_seconds > 0 else "mrmr"
-        entries.append((key, result.selection_time_seconds, selector_type))
+        n_features = result.n_steps if result.n_steps > 0 else 1  # avoid division by zero
+        time_per_feat = result.selection_time_seconds / n_features
+        entries.append((key, time_per_feat, result.selection_time_seconds, result.n_steps, selector_type))
 
-    # Sort by time ascending (longest at top for horizontal bar)
+    # Sort by time-per-feature ascending (longest at top for horizontal bar)
     entries.sort(key=lambda x: x[1])
 
     labels = [e[0] for e in entries]
-    times = [e[1] for e in entries]
-    types = [e[2] for e in entries]
+    times_per_feat = [e[1] for e in entries]
+    total_times = [e[2] for e in entries]
+    n_features = [e[3] for e in entries]
+    types = [e[4] for e in entries]
     colors = ["#e74c3c" if t == "wrapper" else "#3498db" for t in types]
 
     source = ColumnDataSource(data=dict(
         labels=labels,
-        times=times,
+        times_per_feat=times_per_feat,
+        total_times=total_times,
+        n_features=n_features,
         types=types,
         colors=colors,
     ))
 
     p = figure(
-        title="⏱ Timing Overview — Selection Time (seconds)",
+        title="⏱ Timing Overview — Selection Time per Feature (seconds)",
         y_range=labels,
-        x_axis_label="Time (seconds)",
+        x_axis_label="Time per Feature (seconds)",
         height=max(200, 30 * len(labels) + 80),
         width=700,
         tools="pan,wheel_zoom,box_zoom,reset,save",
@@ -598,7 +631,7 @@ def _build_timing_overview(
 
     p.hbar(
         y="labels",
-        right="times",
+        right="times_per_feat",
         height=0.6,
         color="colors",
         source=source,
@@ -607,18 +640,24 @@ def _build_timing_overview(
 
     hover = HoverTool(tooltips=[
         ("Selector", "@labels"),
-        ("Time", "@times{0.000}s"),
+        ("Time/Feature", "@times_per_feat{0.000}s"),
+        ("Total Time", "@total_times{0.000}s"),
+        ("N Features", "@n_features"),
         ("Type", "@types"),
     ])
     p.add_tools(hover)
 
-    p.xaxis.axis_label_text_font_size = "10pt"
-    p.yaxis.axis_label_text_font_size = "10pt"
+    # Font sizes for Bokeh figures
+    p.title.text_font_size = "13pt"
+    p.xaxis.axis_label_text_font_size = "12pt"
+    p.yaxis.axis_label_text_font_size = "12pt"
+    p.xaxis.major_label_text_font_size = "11pt"
+    p.yaxis.major_label_text_font_size = "11pt"
     p.grid.grid_line_alpha = 0.3
 
     # Add legend manually with colored patches
     legend_html = """
-    <div style="font-size: 0.85em; margin: 5px 0;">
+    <div style="font-size: 0.95em; margin: 5px 0;">
         <span style="display: inline-block; width: 12px; height: 12px;
               background: #3498db; margin-right: 4px; vertical-align: middle;"></span>
         mRmR &nbsp;&nbsp;
@@ -631,6 +670,116 @@ def _build_timing_overview(
     return pn.Column(
         pn.pane.Bokeh(p, sizing_mode="stretch_width"),
         pn.pane.HTML(legend_html, sizing_mode="stretch_width"),
+        sizing_mode="stretch_width",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wrapper evaluations chart
+# ---------------------------------------------------------------------------
+
+def _build_wrapper_evaluations_chart(
+    results: dict[str, "SelectionResult"],
+) -> "pn.Column":
+    """Build a horizontal bar chart showing wrapper evaluator calls vs skipped."""
+    from ..results import WrapperSelectionResult
+
+    # Filter to wrapper results only
+    wrapper_results: dict[str, WrapperSelectionResult] = {}
+    for key, result in results.items():
+        if isinstance(result, WrapperSelectionResult):
+            wrapper_results[key] = result
+
+    if not wrapper_results:
+        return pn.Column(sizing_mode="stretch_width")
+
+    labels = list(wrapper_results.keys())
+    evaluations = [r.n_wrapper_evaluations for r in wrapper_results.values()]
+    skipped = [r.n_evaluations_skipped for r in wrapper_results.values()]
+    pruned = [r.n_candidates_pruned for r in wrapper_results.values()]
+
+    source_eval = ColumnDataSource(data=dict(
+        labels=labels,
+        evaluations=evaluations,
+        skipped=skipped,
+        pruned=pruned,
+    ))
+
+    source_skip = ColumnDataSource(data=dict(
+        labels=labels,
+        evaluations=evaluations,
+        skipped=skipped,
+        pruned=pruned,
+    ))
+
+    p = figure(
+        title="🔢 Wrapper Evaluator Calls",
+        y_range=labels,
+        x_axis_label="Count",
+        height=max(200, 40 * len(labels) + 80),
+        width=700,
+        tools="pan,wheel_zoom,box_zoom,reset,save",
+        sizing_mode="stretch_width",
+    )
+
+    # Evaluations performed (blue bars)
+    eval_bar = p.hbar(
+        y="labels",
+        right="evaluations",
+        height=0.35,
+        color="#3498db",
+        source=source_eval,
+        alpha=0.85,
+        legend_label="Evaluations Performed",
+    )
+
+    # Evaluations skipped (red bars) — offset vertically
+    from bokeh.transform import dodge
+    skip_bar = p.hbar(
+        y=dodge("labels", 0.35, range=p.y_range),
+        right="skipped",
+        height=0.35,
+        color="#e74c3c",
+        source=source_skip,
+        alpha=0.85,
+        legend_label="Evaluations Skipped (pruned)",
+    )
+
+    hover_eval = HoverTool(
+        renderers=[eval_bar],
+        tooltips=[
+            ("Selector", "@labels"),
+            ("Evaluations", "@evaluations"),
+            ("Skipped", "@skipped"),
+            ("Pruned Candidates", "@pruned"),
+        ],
+    )
+    hover_skip = HoverTool(
+        renderers=[skip_bar],
+        tooltips=[
+            ("Selector", "@labels"),
+            ("Evaluations", "@evaluations"),
+            ("Skipped", "@skipped"),
+            ("Pruned Candidates", "@pruned"),
+        ],
+    )
+    p.add_tools(hover_eval)
+    p.add_tools(hover_skip)
+
+    p.legend.location = "top_right"
+    p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "11pt"
+
+    # Font sizes for Bokeh figures
+    p.title.text_font_size = "13pt"
+    p.xaxis.axis_label_text_font_size = "12pt"
+    p.yaxis.axis_label_text_font_size = "12pt"
+    p.xaxis.major_label_text_font_size = "11pt"
+    p.yaxis.major_label_text_font_size = "11pt"
+    p.grid.grid_line_alpha = 0.3
+
+    return pn.Column(
+        pn.pane.Bokeh(p, sizing_mode="stretch_width"),
         sizing_mode="stretch_width",
     )
 
@@ -698,7 +847,7 @@ def generate_dashboard(
             continue
 
         baseline = baselines.get(target_name)
-        tab_content = _build_target_tab(target_name, task_type, target_results, baseline)
+        tab_content = _build_target_tab(target_name, task_type, target_results, baseline, config)
         tabs_list.append((f"🎯 {target_name}", tab_content))
 
     target_tabs = pn.Tabs(*tabs_list, sizing_mode="stretch_width") if tabs_list else pn.Column()
@@ -713,6 +862,9 @@ def generate_dashboard(
     )
     timing_overview = _build_timing_overview(results)
 
+    # ---- Wrapper evaluations chart ---------------------------------------
+    wrapper_evals = _build_wrapper_evaluations_chart(results)
+
     # ---- Assemble layout -------------------------------------------------
     layout = pn.Column(
         header,
@@ -720,6 +872,7 @@ def generate_dashboard(
         comparisons_section,
         timing_header,
         timing_overview,
+        wrapper_evals,
         sizing_mode="stretch_width",
     )
 
