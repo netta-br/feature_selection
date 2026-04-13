@@ -204,7 +204,7 @@ class Pipeline:
             )
 
             if target.task_type == "classification":
-                from feature_selection.src.LR_random_baseline import (
+                from feature_selection.src.baseline.logistic_regression_random_baseline import (
                     plot_performance_with_stats,
                 )
 
@@ -219,7 +219,7 @@ class Pipeline:
                     return_summary=True,
                 )
             elif target.task_type == "regression":
-                from feature_selection.src.LR_regression_baseline import (
+                from feature_selection.src.baseline.linear_regression_random_baseline import (
                     plot_performance_with_stats as reg_baseline,
                 )
 

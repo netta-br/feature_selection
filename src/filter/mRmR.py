@@ -348,7 +348,7 @@ class mRmRSelector:
             )
             return report
         else:  # regression
-            from ..LR_regression_baseline import train_and_evaluate_linear_regression
+            from ..baseline.linear_regression_random_baseline import train_and_evaluate_linear_regression
             _, metrics = train_and_evaluate_linear_regression(
                 X_train=self._X_filled[selected_features],
                 y_train=self.y_train,
