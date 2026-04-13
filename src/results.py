@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -43,6 +45,26 @@ def _yellow(t: str) -> str: return _ansi(_YELLOW, t)
 def _red(t: str)    -> str: return _ansi(_RED,    t)
 def _grey(t: str)   -> str: return _ansi(_GREY,   t)
 def _bold(t: str)   -> str: return _ansi(_BOLD,   t)
+
+
+# ---------------------------------------------------------------------------
+# Numpy → native-Python recursive converter
+# ---------------------------------------------------------------------------
+def _to_native(obj):
+    """Recursively convert numpy types to Python native types."""
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +135,82 @@ class SelectionResult:
 
         lines.append(f"  features          : {self.selected_features}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # JSON serialization / deserialization
+    # ------------------------------------------------------------------
+    def to_dict(self) -> dict:
+        """Convert to a JSON-safe dictionary with a ``_type`` discriminator."""
+        return _to_native({
+            "_type": "SelectionResult",
+            "selected_features": self.selected_features,
+            "performance_history": self.performance_history,
+            "stopping_reason": self.stopping_reason,
+            "n_steps": self.n_steps,
+            "final_metrics": self.final_metrics,
+            "selection_time_seconds": self.selection_time_seconds,
+            "evaluation_time_seconds": self.evaluation_time_seconds,
+            "task_type": self.task_type,
+            "label": self.label,
+        })
+
+    @staticmethod
+    def from_dict(d: dict) -> SelectionResult:
+        """Construct a ``SelectionResult`` or ``WrapperSelectionResult`` from a dict.
+
+        Polymorphic dispatch is based on the ``_type`` discriminator field.
+        """
+        d = dict(d)  # shallow copy so we don't mutate the caller's dict
+        type_tag = d.pop("_type", "SelectionResult")
+
+        if type_tag == "WrapperSelectionResult":
+            return WrapperSelectionResult(
+                selected_features=d.get("selected_features", []),
+                performance_history=d.get("performance_history", []),
+                stopping_reason=d.get("stopping_reason", ""),
+                n_steps=d.get("n_steps", 0),
+                final_metrics=d.get("final_metrics"),
+                selection_time_seconds=d.get("selection_time_seconds", 0.0),
+                evaluation_time_seconds=d.get("evaluation_time_seconds"),
+                task_type=d.get("task_type", "classification"),
+                label=d.get("label", ""),
+                filter_time_seconds=d.get("filter_time_seconds", 0.0),
+                classifier_time_seconds=d.get("classifier_time_seconds", 0.0),
+                test_evaluation_time_seconds=d.get("test_evaluation_time_seconds", 0.0),
+                n_wrapper_evaluations=d.get("n_wrapper_evaluations", 0),
+                n_candidates_pruned=d.get("n_candidates_pruned", 0),
+                n_evaluations_skipped=d.get("n_evaluations_skipped", 0),
+            )
+
+        return SelectionResult(
+            selected_features=d.get("selected_features", []),
+            performance_history=d.get("performance_history", []),
+            stopping_reason=d.get("stopping_reason", ""),
+            n_steps=d.get("n_steps", 0),
+            final_metrics=d.get("final_metrics"),
+            selection_time_seconds=d.get("selection_time_seconds", 0.0),
+            evaluation_time_seconds=d.get("evaluation_time_seconds"),
+            task_type=d.get("task_type", "classification"),
+            label=d.get("label", ""),
+        )
+
+    def save_as_json(self, filepath: str) -> None:
+        """Serialize this result to a JSON file.
+
+        Parent directories are created automatically if they don't exist.
+        """
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as fh:
+            json.dump(self.to_dict(), fh, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def load_from_json(filepath: str) -> SelectionResult:
+        """Deserialize a ``SelectionResult`` (or subclass) from a JSON file."""
+        with open(filepath, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return SelectionResult.from_dict(d)
 
     # ------------------------------------------------------------------
     # compare_with — two-column rank-aligned diff table
@@ -700,3 +798,15 @@ class WrapperSelectionResult(SelectionResult):
             f"  evaluations skipped : {self.n_evaluations_skipped}",
         ]
         return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """Convert to a JSON-safe dictionary with ``_type`` = ``WrapperSelectionResult``."""
+        d = super().to_dict()
+        d["_type"] = "WrapperSelectionResult"
+        d["filter_time_seconds"] = _to_native(self.filter_time_seconds)
+        d["classifier_time_seconds"] = _to_native(self.classifier_time_seconds)
+        d["test_evaluation_time_seconds"] = _to_native(self.test_evaluation_time_seconds)
+        d["n_wrapper_evaluations"] = _to_native(self.n_wrapper_evaluations)
+        d["n_candidates_pruned"] = _to_native(self.n_candidates_pruned)
+        d["n_evaluations_skipped"] = _to_native(self.n_evaluations_skipped)
+        return d

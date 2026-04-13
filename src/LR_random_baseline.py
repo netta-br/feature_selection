@@ -6,64 +6,56 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 
-def train_and_evaluate_logistic_regression(gene_expression_df, train_labels_df, val_labels_df, n_features, random_seed=None, output_dict:bool=False, lr_C:float = np.inf):
+def train_and_evaluate_logistic_regression(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    n_features: int,
+    random_seed: int | None = None,
+    output_dict: bool = False,
+    lr_C: float = np.inf,
+) -> tuple:
     """
-    Trains and evaluates a Logistic Regression model on gene expression data.
+    Trains and evaluates a Logistic Regression model using randomly selected features.
+
+    The caller is responsible for providing ready-to-use DataFrames/Series
+    (samples × features, index = sample IDs).
 
     Args:
-        gene_expression_df (pd.DataFrame): DataFrame containing gene expression data.
-                                           Rows are genes, columns are samples (e.g., F1, F2, ...).
-                                           Assumes the first column is 'Unnamed: 0' for gene names.
-        train_labels_df (pd.DataFrame): DataFrame containing training labels.
-                                        Must have 'samplename' and 'is_lumA' columns.
-        val_labels_df (pd.DataFrame): DataFrame containing validation labels.
-                                      Must have 'samplename' and 'is_lumA' columns.
-        n_features (int): The number of features (genes) to randomly select.
-        random_seed (int, optional): Seed for random feature selection. Defaults to None.
+        X_train (pd.DataFrame): Training feature matrix (samples × features).
+        y_train (pd.Series): Training binary labels.
+        X_val (pd.DataFrame): Validation feature matrix (samples × features).
+        y_val (pd.Series): Validation binary labels.
+        n_features (int): The number of features to randomly select.
+        random_seed (int | None, optional): Seed for random feature selection. Defaults to None.
         output_dict (bool, optional): Whether to return the classification report as a dictionary. Defaults to False.
-        lr_C (float, optional): Regularization parameter for Logistic Regression 
-                                (inverse - smaller value means more regularization). 
+        lr_C (float, optional): Regularization parameter for Logistic Regression
+                                (inverse - smaller value means more regularization).
                                 Defaults to np.inf (no regularization).
 
     Returns:
         tuple: A tuple containing:
                - trained_model (LogisticRegression): The trained Logistic Regression model.
-               - classification_rep (str): A string containing the classification report for the validation set.
+               - classification_rep (str | dict): The classification report for the validation set.
     """
-    # 1. Preprocess gene expression data: Transpose and set gene names as index
-    # Make a copy to avoid modifying the original dataframe
-    gene_expression_processed = gene_expression_df.copy().fillna(0)
-    gene_expression_processed = gene_expression_processed.set_index('Unnamed: 0').T
-    gene_expression_processed.index.name = 'samplename'
-
-    # 2. Align dataframes
-    # Ensure samples in gene_expression_processed match labels dataframes
-    X_train_full = gene_expression_processed.loc[train_labels_df['samplename']]
-    y_train = train_labels_df['is_lumA']
-
-    X_val_full = gene_expression_processed.loc[val_labels_df['samplename']]
-    y_val = val_labels_df['is_lumA']
-
-    # Ensure the order of samples is consistent
-    X_train_full = X_train_full.reindex(train_labels_df['samplename'])
-    X_val_full = X_val_full.reindex(val_labels_df['samplename'])
-
-    # 3. Perform random feature selection
-    if n_features > X_train_full.shape[1]:
+    # 1. Validate n_features
+    if n_features > X_train.shape[1]:
         raise ValueError("n_features cannot be greater than the total number of features.")
 
+    # 2. Perform random feature selection
     np.random.seed(random_seed)
-    selected_features = np.random.choice(X_train_full.columns, n_features, replace=False)
+    selected_features = np.random.choice(X_train.columns, n_features, replace=False)
 
-    X_train = X_train_full[selected_features]
-    X_val = X_val_full[selected_features]
+    X_train_subset = X_train[selected_features]
+    X_val_subset = X_val[selected_features]
 
-    # 4. Train Logistic Regression model
+    # 3. Train Logistic Regression model
     model = LogisticRegression(random_state=random_seed, max_iter=1000, C=lr_C)
-    model.fit(X_train, y_train)
+    model.fit(X_train_subset, y_train)
 
-    # 5. Evaluate model
-    y_pred = model.predict(X_val)
+    # 4. Evaluate model
+    y_pred = model.predict(X_val_subset)
     classification_rep = classification_report(y_val, y_pred, output_dict=output_dict)
 
     return model, classification_rep
@@ -74,14 +66,37 @@ def validation_report_to_df(validation_report, features_num):
   report['features_num'] = features_num
   return report.loc[report['class'] != 'accuracy']
 
-def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
-                                train_labels_df: pd.DataFrame,
-                                val_labels_df: pd.DataFrame,
-                                N_values: list[int],
-                                random_seed: int,
-                                num_runs: int,
-                                lr_C: float = np.inf,
-                                return_summary: bool = False):
+def plot_performance_with_stats(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    N_values: list[int],
+    random_seed: int,
+    num_runs: int,
+    lr_C: float = np.inf,
+    return_summary: bool = False,
+) -> pd.DataFrame | None:
+    """
+    Runs multiple random feature selection experiments and plots performance statistics.
+
+    The caller is responsible for providing ready-to-use DataFrames/Series
+    (samples × features, index = sample IDs).
+
+    Args:
+        X_train (pd.DataFrame): Training feature matrix (samples × features).
+        y_train (pd.Series): Training binary labels.
+        X_val (pd.DataFrame): Validation feature matrix (samples × features).
+        y_val (pd.Series): Validation binary labels.
+        N_values (list[int]): List of feature counts to evaluate.
+        random_seed (int): Base random seed (varied per run).
+        num_runs (int): Number of random runs per feature count.
+        lr_C (float, optional): Regularization parameter. Defaults to np.inf.
+        return_summary (bool, optional): Whether to return baseline summary DataFrame. Defaults to False.
+
+    Returns:
+        pd.DataFrame | None: Baseline summary if return_summary is True, else None.
+    """
     all_runs_results = []
     # Also collect per-run accuracy + macro f1 for the wide-format baseline_summary
     acc_records = []
@@ -91,9 +106,10 @@ def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
         for n in N_values:
             # Call the train_and_evaluate_logistic_regression function
             _, validation_report = train_and_evaluate_logistic_regression(
-                gene_expression_df=gene_expression_df,
-                train_labels_df=train_labels_df,
-                val_labels_df=val_labels_df,
+                X_train=X_train,
+                y_train=y_train,
+                X_val=X_val,
+                y_val=y_val,
                 n_features=n,
                 random_seed=random_seed + run_id, # Vary seed for each run
                 output_dict=True,
@@ -132,7 +148,7 @@ def plot_performance_with_stats(gene_expression_df:pd.DataFrame,
 
     # Display the summary statistics table
     print("\nSummary Statistics (Mean +/- Std Dev):\n")
-    display(summary_stats)
+    print(summary_stats)
 
     # Plotting
     plt.figure(figsize=(12, 7))

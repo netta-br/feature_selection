@@ -84,13 +84,10 @@ class mRmRSelector:
         Path to a pre-computed relevance scores CSV (non-correlation methods).
         If the file does not exist it will be computed and saved here.
         ``None`` activates lazy per-feature computation (Mode B).
-    gene_expression_df, train_labels_df, val_labels_df : pd.DataFrame | None
-        Domain-specific data forwarded to the LR classification evaluation helper.
-        Evaluation is skipped if any of the three is ``None``.
     X_val : pd.DataFrame | None
-        Generic validation feature matrix for regression evaluation.
+        Validation feature matrix.  Evaluation is skipped when ``None``.
     y_val : pd.Series | None
-        Generic validation target vector for regression evaluation.
+        Validation target vector.  Evaluation is skipped when ``None``.
     lr_C : float
         Regularisation parameter forwarded to the LR helper.
     random_seed : int | None
@@ -114,13 +111,9 @@ class mRmRSelector:
         correlation_filepath: str | None = None,
         # G4 — non-correlation relevance scores filepath
         relevance_scores_filepath: str | None = None,
-        # --- classification evaluation params (P0: domain-specific) ---
-        gene_expression_df: pd.DataFrame | None = None,
-        train_labels_df: pd.DataFrame | None = None,
-        val_labels_df: pd.DataFrame | None = None,
         lr_C: float = np.inf,
         random_seed: int | None = None,
-        # G3 — generic regression evaluation params
+        # generic evaluation params (classification & regression)
         X_val: pd.DataFrame | None = None,
         y_val: pd.Series | None = None,
     ) -> None:
@@ -164,16 +157,13 @@ class mRmRSelector:
         self.correlation_filepath = correlation_filepath
         self.relevance_scores_filepath = relevance_scores_filepath
 
-        self.gene_expression_df = gene_expression_df
-        self.train_labels_df = train_labels_df
-        self.val_labels_df = val_labels_df
         self.lr_C = lr_C
         self.random_seed = random_seed
 
         # NaN imputation — done once, reused everywhere
         self._X_filled: pd.DataFrame = X_train.fillna(0)
 
-        # regression evaluation data
+        # evaluation data (classification & regression)
         self._X_val_filled: pd.DataFrame | None = X_val.fillna(0) if X_val is not None else None
         self._y_val: pd.Series | None = y_val
 
@@ -341,10 +331,16 @@ class mRmRSelector:
     # ------------------------------------------------------------------
     def _evaluate_step(self, selected_features: list[str]) -> dict:
         if self._task_type == "classification":
+            if self._X_val_filled is None or self._y_val is None:
+                logger.warning(
+                    "Classification evaluation skipped: X_val or y_val not provided."
+                )
+                return {}
             _, report = evaluate_logistic_regression_with_given_features(
-                gene_expression_df=self.gene_expression_df,
-                train_labels_df=self.train_labels_df,
-                val_labels_df=self.val_labels_df,
+                X_train=self._X_filled,
+                y_train=self.y_train,
+                X_val=self._X_val_filled,
+                y_val=self._y_val,
                 feature_list=selected_features,
                 random_seed=self.random_seed,
                 output_dict=True,
@@ -424,13 +420,7 @@ class mRmRSelector:
 
         # eval enabled for classification OR regression
         _eval_enabled = (
-            self._task_type == "classification"
-            and self.gene_expression_df is not None
-            and self.train_labels_df is not None
-            and self.val_labels_df is not None
-        ) or (
-            self._task_type == "regression"
-            and self._X_val_filled is not None
+            self._X_val_filled is not None
             and self._y_val is not None
         )
 
