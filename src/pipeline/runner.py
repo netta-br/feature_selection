@@ -254,14 +254,49 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _run_selectors(self) -> None:
-        """Run each enabled selector for each of its target variables."""
+        """Run each enabled selector for each of its target variables.
+
+        Always computes and saves the selector hash map for the current run so
+        future runs can use it as a cache source.  When
+        ``config.output.fetch_past_results`` is ``True``, past run directories
+        are scanned first and any matching selector results are loaded from
+        their saved JSON files rather than recomputed.
+        """
+        from .cache import SelectorCacheManager
+
+        cache_mgr = SelectorCacheManager(self.config.output.base_dir, self.config)
+
+        # Step 1 & 2: always compute and persist the hash map for this run
+        current_hashes = cache_mgr.compute_current_hashes()
+        cache_mgr.save_hash_map(self._output_dir, current_hashes)
+
+        # Steps 3-5: resolve from past runs when feature is enabled
+        remaining: set[str] = set(current_hashes.keys())
+        if self.config.output.fetch_past_results:
+            cached_results = cache_mgr.resolve_from_past_runs(
+                current_hashes, self._output_dir
+            )
+            for result_key, result in cached_results.items():
+                self.results[result_key] = result
+                remaining.discard(result_key)
+            log.info(
+                "Cache: %d hit(s), %d selector(s) to compute",
+                len(cached_results),
+                len(remaining),
+            )
+
+        # Run selectors that were not resolved from cache
         for selector in self.config.selectors:
             if not selector.enabled:
                 continue
 
             for target_name in selector.targets:
-                target_data = self._data.targets[target_name]
                 result_key = f"{selector.label}__{target_name}"
+                if result_key not in remaining:
+                    log.info("Skipping (cached): %s", result_key)
+                    continue
+
+                target_data = self._data.targets[target_name]
                 log.info("Running selector: %s", result_key)
 
                 if selector.type == "mrmr":

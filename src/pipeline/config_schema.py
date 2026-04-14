@@ -76,6 +76,7 @@ class OutputConfig:
     base_dir: str = "./output"
     save_results_json: bool = True
     generate_dashboard: bool = True
+    fetch_past_results: bool = False
 
 
 @dataclass

@@ -158,6 +158,8 @@ def _handle_run(args: argparse.Namespace) -> None:
         # Allow --output to override even in config mode
         if args.output != "./output":
             config.output.base_dir = args.output
+        if args.fetch_past_results:
+            config.output.fetch_past_results = True
         output_dir = Pipeline(config).run()
         logger.info("Pipeline finished. Output: %s", output_dir)
         return
@@ -184,6 +186,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     config.targets = [TargetConfig(name=args.target, task_type=args.task)]
     config.output.base_dir = args.output
     config.output.generate_dashboard = not args.no_dashboard
+    config.output.fetch_past_results = args.fetch_past_results
     config.baseline.enabled = not args.no_baseline
 
     # Collect enabled shorthand selectors
@@ -305,6 +308,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Disable baseline evaluation",
+    )
+    run_parser.add_argument(
+        "--fetch-past-results",
+        dest="fetch_past_results",
+        action="store_true",
+        default=False,
+        help=(
+            "Reuse selector results from previous runs in the same output "
+            "directory when the algorithm configuration matches (default: False)"
+        ),
     )
     run_parser.add_argument(
         "--no-dashboard",
