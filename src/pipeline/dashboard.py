@@ -255,37 +255,102 @@ def _build_metrics_table(
     target_results: dict[str, "SelectionResult"],
     task_type: str,
 ) -> "pn.pane.HTML":
-    """Build the metrics summary table at each selector's final step (with sortable columns).
+    """Build the metrics summary table with a k-features toggle.
+
+    A dropdown lets the user pick a feature count k; the table then shows each
+    selector's metrics from the last ``performance_history`` entry where
+    ``step <= k``.  The "Max" option (default) shows each selector's final
+    evaluation regardless of step count.
 
     Panel embeds HTML pane content via innerHTML inside a shadow DOM, which means
-    <script> tags never execute.  Instead we use inline onclick attributes on the
-    <th> elements — those fire correctly even when set via innerHTML.  The sort
-    logic is encoded as a self-contained JS string in each onclick handler.
+    <script> tags never execute.  All interactivity uses inline onchange/onclick
+    attributes.  Per-selector history is stored in a hidden ``<div>``'s
+    ``data-history`` attribute as JSON so the onchange handler can read it
+    without needing a ``<script>`` block.
     """
+    import json as _json
     import uuid
     metrics = _CLF_METRICS if task_type == "classification" else _REG_METRICS
     table_id = f"metrics_tbl_{uuid.uuid4().hex[:8]}"
+    hist_id  = f"hist_{table_id}"
+    sel_id   = f"k_sel_{table_id}"
+    desc_id  = f"k_desc_{table_id}"
+
+    # ------------------------------------------------------------------
+    # Collect all step values to build dropdown options
+    # ------------------------------------------------------------------
+    all_steps: list[int] = sorted({
+        int(entry["step"])
+        for result in target_results.values()
+        for entry in result.performance_history
+        if entry.get("step") is not None
+    })
+
+    # ------------------------------------------------------------------
+    # Serialize performance_history for all selectors
+    # Only keep keys needed for the toggle: step + metric keys
+    # ------------------------------------------------------------------
+    metric_keys = [mk for mk, _ in metrics]
+    history_data: dict[str, list[dict]] = {}
+    for label, result in target_results.items():
+        history_data[label] = [
+            {k: v for k, v in entry.items() if k in ("step", *metric_keys)}
+            for entry in result.performance_history
+            if entry.get("step") is not None
+        ]
+
+    # Encode history as Base64 so it survives Panel's html.escape() →
+    # DOMParser.textContent → innerHTML decode chain without any quote
+    # or entity conflicts.  JS reads it back with atob() + JSON.parse().
+    import base64 as _b64
+    history_json = _json.dumps(history_data, separators=(",", ":"))
+    history_b64 = _b64.b64encode(history_json.encode("utf-8")).decode("ascii")
+
+    # ------------------------------------------------------------------
+    # Build initial rows (Max = last entry per selector)
+    # ------------------------------------------------------------------
+    def _row_html(label: str, entry: dict, stopping_reason: str) -> str:
+        step = entry.get("step", "—")
+        cells = (
+            f'<td data-col="0" data-val="{label}">{label}</td>'
+            f'<td data-col="1" data-val="{step}">{step}</td>'
+            f'<td data-col="2" data-val="{stopping_reason}">{stopping_reason}</td>'
+        )
+        for i, (mk, _) in enumerate(metrics):
+            val = entry.get(mk)
+            if val is not None:
+                cells += f'<td data-col="{3+i}" data-val="{val}">{val:.4f}</td>'
+            else:
+                cells += f'<td data-col="{3+i}" data-val="-1">—</td>'
+        return f'<tr data-selector="{label}">{cells}</tr>'
 
     rows_html: list[str] = []
     for label, result in target_results.items():
-        n_features = result.n_steps
         last = result.performance_history[-1] if result.performance_history else {}
-        cells = (
-            f'<td data-val="{label}">{label}</td>'
-            f'<td data-val="{n_features}">{n_features}</td>'
-            f'<td data-val="{result.stopping_reason}">{result.stopping_reason}</td>'
-        )
-        for mk, _ in metrics:
-            val = last.get(mk)
-            if val is not None:
-                cells += f'<td data-val="{val}">{val:.4f}</td>'
-            else:
-                cells += '<td data-val="-1">—</td>'
-        rows_html.append(f"<tr>{cells}</tr>")
+        rows_html.append(_row_html(label, last, result.stopping_reason))
 
-    # Inline onclick that is self-contained — no external script needed.
-    # Single-quoted JS inside double-quoted HTML attr; escapes are kept minimal.
+    # ------------------------------------------------------------------
+    # Inline sort JS (reusable snippet — stored as a Python string and
+    # referenced in both th onclick and the onchange re-sort call)
+    # ------------------------------------------------------------------
     _th_style = "padding: 6px 10px; text-align: left; cursor: pointer; user-select: none;"
+
+    # JS helper: sort the tbody rows by column col, direction asc.
+    # Used both in _th() onclick and reproduced after each k-change.
+    _sort_body_js = (
+        "var tbody=tbl.querySelector('tbody');"
+        "var rows=Array.from(tbody.querySelectorAll('tr'));"
+        "rows.sort(function(a,b){"
+        "  var ca=a.querySelectorAll('td')[sortCol];"
+        "  var cb=b.querySelectorAll('td')[sortCol];"
+        "  var va=ca?ca.getAttribute('data-val'):'';"
+        "  var vb=cb?cb.getAttribute('data-val'):'';"
+        "  var na=parseFloat(va),nb=parseFloat(vb);"
+        "  if(!isNaN(na)&&!isNaN(nb))return sortAsc?na-nb:nb-na;"
+        "  return sortAsc?va.localeCompare(vb):vb.localeCompare(va);"
+        "});"
+        "rows.forEach(function(r){tbody.appendChild(r);});"
+    )
 
     def _th(col: int, label: str) -> str:
         js = (
@@ -294,28 +359,19 @@ def _build_metrics_table(
             "var root=th.getRootNode();"
             "var tbl=root.getElementById?root.getElementById(tblId):root.querySelector('#'+tblId);"
             "if(!tbl)return;"
-            "var col=parseInt(th.getAttribute('data-col'));"
+            "var sortCol=parseInt(th.getAttribute('data-col'));"
             "var cur=th.getAttribute('data-sort');"
-            "var asc=cur!=='asc';"
+            "var sortAsc=cur!=='asc';"
+            # store active sort state on the table element for the k-toggle to reuse
+            "tbl._kSortCol=sortCol;tbl._kSortAsc=sortAsc;"
             "tbl.querySelectorAll('thead th[data-col]').forEach(function(h){"
             "  h.setAttribute('data-sort','');"
             "  var base=h.getAttribute('data-label');"
             "  h.textContent=base+' \u2195';"
             "});"
-            "th.setAttribute('data-sort',asc?'asc':'desc');"
-            "th.textContent=th.getAttribute('data-label')+(asc?' \u2191':' \u2193');"
-            "var tbody=tbl.querySelector('tbody');"
-            "var rows=Array.from(tbody.querySelectorAll('tr'));"
-            "rows.sort(function(a,b){"
-            "  var ca=a.querySelectorAll('td')[col];"
-            "  var cb=b.querySelectorAll('td')[col];"
-            "  var va=ca?ca.getAttribute('data-val'):'';"
-            "  var vb=cb?cb.getAttribute('data-val'):'';"
-            "  var na=parseFloat(va),nb=parseFloat(vb);"
-            "  if(!isNaN(na)&&!isNaN(nb))return asc?na-nb:nb-na;"
-            "  return asc?va.localeCompare(vb):vb.localeCompare(va);"
-            "});"
-            "rows.forEach(function(r){tbody.appendChild(r);});"
+            "th.setAttribute('data-sort',sortAsc?'asc':'desc');"
+            "th.textContent=th.getAttribute('data-label')+(sortAsc?' \u2191':' \u2193');"
+            + _sort_body_js +
             "})(this)"
         )
         return (
@@ -325,9 +381,103 @@ def _build_metrics_table(
 
     metric_headers = "".join(_th(3 + i, ml) for i, (_, ml) in enumerate(metrics))
 
+    # ------------------------------------------------------------------
+    # Dropdown options HTML
+    # ------------------------------------------------------------------
+    options_html = '<option value="max" selected>Max</option>'
+    for s in all_steps:
+        options_html += f'<option value="{s}">{s}</option>'
+
+    # ------------------------------------------------------------------
+    # onchange JS for the k-features dropdown
+    # Reads history JSON from the hidden div, finds the last entry with
+    # step <= k for each selector row, re-renders cells, then re-sorts.
+    # ------------------------------------------------------------------
+    onchange_js = (
+        "(function(sel){"
+        f"var tblId='{table_id}';"
+        f"var histId='{hist_id}';"
+        f"var descId='{desc_id}';"
+        "var root=sel.getRootNode();"
+        "var tbl=root.getElementById?root.getElementById(tblId):root.querySelector('#'+tblId);"
+        "var histEl=root.getElementById?root.getElementById(histId):root.querySelector('#'+histId);"
+        "var descEl=root.getElementById?root.getElementById(descId):root.querySelector('#'+descId);"
+        "if(!tbl||!histEl)return;"
+        "var k=sel.value==='max'?Infinity:parseInt(sel.value);"
+        "if(descEl){"
+        "  descEl.textContent=sel.value==='max'?"
+        "    'Showing final metrics per selector':"
+        "    ('Showing metrics at \u2264 '+k+' features');"
+        "}"
+        # decode Base64 history from data attribute, then JSON.parse
+        "var hist=JSON.parse(atob(histEl.getAttribute('data-history')));"
+        # iterate over rows
+        "var rows=tbl.querySelectorAll('tbody tr');"
+        "rows.forEach(function(row){"
+        "  var label=row.getAttribute('data-selector');"
+        "  var entries=hist[label]||[];"
+        # find last entry with step <= k (or last entry if k=Infinity)
+        "  var chosen=null;"
+        "  for(var i=0;i<entries.length;i++){"
+        "    if(entries[i].step<=k)chosen=entries[i];"
+        "  }"
+        "  var tds=row.querySelectorAll('td');"
+        # col 1 = N Features
+        "  if(tds[1]){"
+        "    var step=chosen?chosen.step:'—';"
+        "    tds[1].textContent=step;"
+        "    tds[1].setAttribute('data-val',chosen?chosen.step:-1);"
+        "  }"
+        # cols 3..3+n_metrics-1 = metric values — use single-quoted JS array
+        # to avoid double-quotes breaking the onchange="..." HTML attribute
+        "  var metricKeys=[" + ",".join(f"'{k}'" for k in metric_keys) + "];"
+        "  for(var m=0;m<metricKeys.length;m++){"
+        "    var td=tds[3+m];"
+        "    if(!td)continue;"
+        "    var v=chosen?chosen[metricKeys[m]]:null;"
+        "    if(v!=null&&v!==undefined){"
+        "      td.textContent=v.toFixed(4);"
+        "      td.setAttribute('data-val',v);"
+        "    } else {"
+        "      td.textContent='\u2014';"
+        "      td.setAttribute('data-val',-1);"
+        "    }"
+        "  }"
+        "});"
+        # re-apply active sort if any
+        "var sortCol=tbl._kSortCol;"
+        "var sortAsc=tbl._kSortAsc;"
+        "if(sortCol!==undefined&&sortCol!==null){"
+        + _sort_body_js +
+        "}"
+        "})(this)"
+    )
+
+    # ------------------------------------------------------------------
+    # Assemble final HTML
+    # ------------------------------------------------------------------
     html = f"""
     <div style="margin: 10px 0;">
         <h3 style="margin-bottom: 8px;">&#x1F4CA; Final Metrics Summary</h3>
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;
+                    background:#f7f7f7; border-radius:20px; padding:7px 16px;
+                    border:1px solid #ddd; width:fit-content;">
+            <label for="{sel_id}"
+                   style="font-weight:bold; font-size:0.95em; white-space:nowrap;">
+                &#x1F522; Compare at k features:
+            </label>
+            <select id="{sel_id}"
+                    onchange="{onchange_js}"
+                    style="padding:3px 8px; border:1px solid #bbb; border-radius:6px;
+                           font-size:0.95em; background:#fff; cursor:pointer;">
+                {options_html}
+            </select>
+            <span id="{desc_id}"
+                  style="color:#888; font-size:0.88em; white-space:nowrap;">
+                Showing final metrics per selector
+            </span>
+        </div>
+        <div id="{hist_id}" data-history="{history_b64}" style="display:none;"></div>
         <table id="{table_id}" style="border-collapse: collapse; width: 100%; font-size: 1.0em;">
             <thead>
                 <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
