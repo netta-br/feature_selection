@@ -219,11 +219,17 @@ def _build_performance_plots(
                     LegendItem(label="Baseline (mean ± std)", renderers=[bl_line])
                 )
 
-        # Add legend
+        # Add legend — scrollable via CSS so all selectors are visible
         if legend_items:
             legend = Legend(items=legend_items, location="top_left")
             legend.click_policy = "hide"
             legend.label_text_font_size = "11pt"
+            legend.stylesheets.append("""
+:host {
+    max-height: 280px;
+    overflow-y: auto;
+}
+""")
             p.add_layout(legend, "right")
 
         # Font sizes for Bokeh figures
@@ -238,7 +244,7 @@ def _build_performance_plots(
         figures.append(p)
 
     bokeh_panes = [pn.pane.Bokeh(fig, sizing_mode="stretch_width") for fig in figures]
-    return pn.Row(*bokeh_panes, sizing_mode="stretch_width")
+    return pn.Column(*bokeh_panes, sizing_mode="stretch_width")
 
 
 # ---------------------------------------------------------------------------
@@ -249,30 +255,85 @@ def _build_metrics_table(
     target_results: dict[str, "SelectionResult"],
     task_type: str,
 ) -> "pn.pane.HTML":
-    """Build the metrics summary table at each selector's final step."""
+    """Build the metrics summary table at each selector's final step (with sortable columns).
+
+    Panel embeds HTML pane content via innerHTML inside a shadow DOM, which means
+    <script> tags never execute.  Instead we use inline onclick attributes on the
+    <th> elements — those fire correctly even when set via innerHTML.  The sort
+    logic is encoded as a self-contained JS string in each onclick handler.
+    """
+    import uuid
     metrics = _CLF_METRICS if task_type == "classification" else _REG_METRICS
+    table_id = f"metrics_tbl_{uuid.uuid4().hex[:8]}"
 
     rows_html: list[str] = []
     for label, result in target_results.items():
         n_features = result.n_steps
         last = result.performance_history[-1] if result.performance_history else {}
-        cells = f"<td>{label}</td><td>{n_features}</td>"
-        cells += f"<td>{result.stopping_reason}</td>"
+        cells = (
+            f'<td data-val="{label}">{label}</td>'
+            f'<td data-val="{n_features}">{n_features}</td>'
+            f'<td data-val="{result.stopping_reason}">{result.stopping_reason}</td>'
+        )
         for mk, _ in metrics:
             val = last.get(mk)
-            cells += f"<td>{val:.4f}</td>" if val is not None else "<td>—</td>"
+            if val is not None:
+                cells += f'<td data-val="{val}">{val:.4f}</td>'
+            else:
+                cells += '<td data-val="-1">—</td>'
         rows_html.append(f"<tr>{cells}</tr>")
 
-    metric_headers = "".join(f"<th>{ml}</th>" for _, ml in metrics)
+    # Inline onclick that is self-contained — no external script needed.
+    # Single-quoted JS inside double-quoted HTML attr; escapes are kept minimal.
+    _th_style = "padding: 6px 10px; text-align: left; cursor: pointer; user-select: none;"
+
+    def _th(col: int, label: str) -> str:
+        js = (
+            "(function(th){"
+            f"var tblId='{table_id}';"
+            "var root=th.getRootNode();"
+            "var tbl=root.getElementById?root.getElementById(tblId):root.querySelector('#'+tblId);"
+            "if(!tbl)return;"
+            "var col=parseInt(th.getAttribute('data-col'));"
+            "var cur=th.getAttribute('data-sort');"
+            "var asc=cur!=='asc';"
+            "tbl.querySelectorAll('thead th[data-col]').forEach(function(h){"
+            "  h.setAttribute('data-sort','');"
+            "  var base=h.getAttribute('data-label');"
+            "  h.textContent=base+' \u2195';"
+            "});"
+            "th.setAttribute('data-sort',asc?'asc':'desc');"
+            "th.textContent=th.getAttribute('data-label')+(asc?' \u2191':' \u2193');"
+            "var tbody=tbl.querySelector('tbody');"
+            "var rows=Array.from(tbody.querySelectorAll('tr'));"
+            "rows.sort(function(a,b){"
+            "  var ca=a.querySelectorAll('td')[col];"
+            "  var cb=b.querySelectorAll('td')[col];"
+            "  var va=ca?ca.getAttribute('data-val'):'';"
+            "  var vb=cb?cb.getAttribute('data-val'):'';"
+            "  var na=parseFloat(va),nb=parseFloat(vb);"
+            "  if(!isNaN(na)&&!isNaN(nb))return asc?na-nb:nb-na;"
+            "  return asc?va.localeCompare(vb):vb.localeCompare(va);"
+            "});"
+            "rows.forEach(function(r){tbody.appendChild(r);});"
+            "})(this)"
+        )
+        return (
+            f'<th data-col="{col}" data-label="{label}" data-sort="" '
+            f'style="{_th_style}" onclick="{js}">{label} \u2195</th>'
+        )
+
+    metric_headers = "".join(_th(3 + i, ml) for i, (_, ml) in enumerate(metrics))
+
     html = f"""
     <div style="margin: 10px 0;">
-        <h3 style="margin-bottom: 8px;">📊 Final Metrics Summary</h3>
-        <table style="border-collapse: collapse; width: 100%; font-size: 1.0em;">
+        <h3 style="margin-bottom: 8px;">&#x1F4CA; Final Metrics Summary</h3>
+        <table id="{table_id}" style="border-collapse: collapse; width: 100%; font-size: 1.0em;">
             <thead>
                 <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
-                    <th style="padding: 6px 10px; text-align: left;">Selector</th>
-                    <th style="padding: 6px 10px; text-align: left;">N Features</th>
-                    <th style="padding: 6px 10px; text-align: left;">Stopping Reason</th>
+                    {_th(0, "Selector")}
+                    {_th(1, "N Features")}
+                    {_th(2, "Stopping Reason")}
                     {metric_headers}
                 </tr>
             </thead>
@@ -283,8 +344,7 @@ def _build_metrics_table(
     </div>
     """
     # Apply consistent cell styling
-    html = html.replace("<td>", '<td style="padding: 5px 10px; border-bottom: 1px solid #eee;">')
-    html = html.replace("<th style=", '<th style="text-align: left; ')
+    html = html.replace("<td ", '<td style="padding: 5px 10px; border-bottom: 1px solid #eee;" ')
     return pn.pane.HTML(html, sizing_mode="stretch_width")
 
 
