@@ -9,7 +9,6 @@ from time import perf_counter
 import numpy as np
 import pandas as pd
 
-from ..evaluation.logistic_regression import evaluate_logistic_regression_with_given_features
 from ..score_calculator import ScoreCalculator, infer_task_type
 from ..score_matrix import ScoreMatrix
 from ..results import SelectionResult
@@ -336,28 +335,13 @@ class mRmRSelector:
                     "Classification evaluation skipped: X_val or y_val not provided."
                 )
                 return {}
-            _, report = evaluate_logistic_regression_with_given_features(
-                X_train=self._X_filled,
-                y_train=self.y_train,
-                X_val=self._X_val_filled,
-                y_val=self._y_val,
-                feature_list=selected_features,
-                random_seed=self.random_seed,
-                output_dict=True,
-                lr_C=self.lr_C,
-            )
-            return report
+            from ..evaluation.evaluator import LogisticRegressionEvaluator
+            ev = LogisticRegressionEvaluator({"C": self.lr_C, "random_state": self.random_seed})
+            return ev.evaluate(self._X_filled, self.y_train, self._X_val_filled, self._y_val, selected_features)
         else:  # regression
-            from ..baseline.linear_regression_random_baseline import train_and_evaluate_linear_regression
-            _, metrics = train_and_evaluate_linear_regression(
-                X_train=self._X_filled[selected_features],
-                y_train=self.y_train,
-                X_val=self._X_val_filled[selected_features],
-                y_val=self._y_val,
-                n_features=len(selected_features),
-                random_seed=self.random_seed,
-            )
-            return metrics
+            from ..evaluation.evaluator import LinearRegressionEvaluator
+            ev = LinearRegressionEvaluator()
+            return ev.evaluate(self._X_filled, self.y_train, self._X_val_filled, self._y_val, selected_features)
 
     # ------------------------------------------------------------------
     # G1 — forward selection with eval_every_k + step injection
@@ -477,14 +461,11 @@ class mRmRSelector:
                 # Log depending on task type
                 if self._task_type == "classification":
                     acc = metrics.get("accuracy", float("nan"))
-                    f1 = (
-                        metrics.get("macro avg", {}).get("f1-score", float("nan"))
-                        if isinstance(metrics.get("macro avg"), dict)
-                        else float("nan")
-                    )
+                    macro_f1 = metrics.get("macro_f1", float("nan"))
+                    weighted_f1 = metrics.get("weighted_f1", float("nan"))
                     logger.info(
-                        "Step %d eval — accuracy: %.4f  macro F1: %.4f",
-                        step + 1, acc, f1,
+                        "Step %d eval — accuracy: %.4f  macro_f1: %.4f  weighted_f1: %.4f",
+                        step + 1, acc, macro_f1, weighted_f1,
                     )
                 else:
                     logger.info(
@@ -554,24 +535,35 @@ class mRmRSelector:
     @staticmethod
     def _resolve_metric(report: dict, metric_key: str) -> float:
         """
-        Resolve a dotted metric key from an evaluation report dict.
+        Resolve a metric key from an evaluation report dict.
 
         Supported formats
         -----------------
-        * ``'accuracy'``, ``'r2'``, ``'mse'``, ``'mae'``
-        * ``'macro avg_f1-score'``  →  ``report['macro avg']['f1-score']``
+        * Flat keys: ``'accuracy'``, ``'macro_f1'``, ``'weighted_f1'``,
+          ``'macro_precision'``, ``'macro_recall'``, ``'r2'``, ``'mse'``, ``'mae'``
+        * Legacy compound keys (backward compat):
+          ``'macro avg_f1-score'`` → resolves to ``'macro_f1'``
+          ``'weighted avg_f1-score'`` → resolves to ``'weighted_f1'``
+          ``'macro avg_precision-score'`` → resolves to ``'macro_precision'``
+          ``'macro avg_recall-score'`` → resolves to ``'macro_recall'``
         * any single-level key present directly in *report*
         """
+        # Direct flat key lookup (handles all new-style and simple keys)
         if metric_key in report:
             v = report[metric_key]
             return float(v) if not isinstance(v, dict) else float("nan")
 
-        # Try split on first underscore to handle 'macro avg_f1-score' style
-        if "_" in metric_key:
-            idx = metric_key.index("_")
-            outer, inner = metric_key[:idx], metric_key[idx + 1:]
-            if outer in report and isinstance(report[outer], dict):
-                return float(report[outer].get(inner, float("nan")))
+        # Legacy compound key mapping for backward compatibility
+        _legacy_map = {
+            "macro avg_f1-score": "macro_f1",
+            "weighted avg_f1-score": "weighted_f1",
+            "macro avg_precision-score": "macro_precision",
+            "macro avg_recall-score": "macro_recall",
+        }
+        if metric_key in _legacy_map:
+            flat_key = _legacy_map[metric_key]
+            if flat_key in report:
+                return float(report[flat_key])
 
         logger.warning(
             "stopping_metric '%s' not found in evaluation report — "

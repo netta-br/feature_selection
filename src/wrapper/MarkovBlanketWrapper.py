@@ -364,26 +364,13 @@ class WrapperSelector:
         Returns a metrics dict compatible with SelectionResult's
         performance_history format.
         """
-        clf = copy.deepcopy(self._evaluator)
-        X_tr = self._X_filled[features].values
-        X_vl = self._X_val_filled[features].values
-        y_tr = self._y_train.values
-        y_vl = self._y_val.values
-
-        clf.fit(X_tr, y_tr)
-        y_pred = clf.predict(X_vl)
-
         if self._task_type == "classification":
-            from sklearn.metrics import classification_report
-            report = classification_report(y_vl, y_pred, output_dict=True)
-            return report
+            from ..evaluation.evaluator import LogisticRegressionEvaluator
+            ev = LogisticRegressionEvaluator({"random_state": self.random_seed})
         else:
-            from sklearn.metrics import mean_squared_error, mean_absolute_error
-            return {
-                "r2":  float(r2_score(y_vl, y_pred)),
-                "mse": float(mean_squared_error(y_vl, y_pred)),
-                "mae": float(mean_absolute_error(y_vl, y_pred)),
-            }
+            from ..evaluation.evaluator import LinearRegressionEvaluator
+            ev = LinearRegressionEvaluator()
+        return ev.evaluate(self._X_filled, self._y_train, self._X_val_filled, self._y_val, features)
 
     # ------------------------------------------------------------------
     # Metric resolution helper

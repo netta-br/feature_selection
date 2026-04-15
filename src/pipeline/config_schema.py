@@ -62,6 +62,20 @@ class ComparisonConfig:
 
 
 @dataclass
+class EvaluatorConfig:
+    label: str = ""
+    type: str = "logistic_regression"
+    # valid: "logistic_regression" | "linear_regression" | "knn" | "naive_bayes"
+    task_type: str = "classification"
+    # valid: "classification" | "regression"
+    params: dict[str, Any] = field(default_factory=dict)
+    eval_every_k: int = 1
+    # Step size for performance history: evaluate at k, 2k, 3k, … features.
+    # Independent of the selector's own eval_every_k — allows backfilling
+    # evaluations at different granularities without re-running selection.
+
+
+@dataclass
 class ScoreMatrixConfig:
     random_forest: dict[str, Any] = field(
         default_factory=lambda: {"n_estimators": 100, "max_depth": None}
@@ -89,6 +103,7 @@ class PipelineConfig:
     comparisons: list[ComparisonConfig] = field(default_factory=list)
     score_matrix: ScoreMatrixConfig = field(default_factory=ScoreMatrixConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    evaluators: list[EvaluatorConfig] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +230,38 @@ def validate_config(config: PipelineConfig) -> list[str]:
                 f"(got '{c.type}')."
             )
 
+    _VALID_EVAL_TYPES = {"logistic_regression", "linear_regression", "knn", "naive_bayes"}
+    _CLF_ONLY_TYPES   = {"logistic_regression", "knn", "naive_bayes"}
+    _REG_ONLY_TYPES   = {"linear_regression"}
+
+    seen_eval_labels: set[str] = set()
+    for i, ev in enumerate(config.evaluators):
+        if not ev.label:
+            errors.append(f"evaluators[{i}].label must be non-empty.")
+        else:
+            if ev.label in seen_eval_labels:
+                errors.append(f"evaluators[{i}].label '{ev.label}' is duplicated.")
+            seen_eval_labels.add(ev.label)
+
+        if ev.type not in _VALID_EVAL_TYPES:
+            errors.append(
+                f"evaluators[{i}].type must be one of {sorted(_VALID_EVAL_TYPES)} "
+                f"(got '{ev.type}')."
+            )
+        if ev.task_type not in ("classification", "regression"):
+            errors.append(
+                f"evaluators[{i}].task_type must be 'classification' or 'regression' "
+                f"(got '{ev.task_type}')."
+            )
+        if ev.type in _CLF_ONLY_TYPES and ev.task_type != "classification":
+            errors.append(
+                f"evaluators[{i}].type '{ev.type}' is only valid for task_type='classification'."
+            )
+        if ev.type in _REG_ONLY_TYPES and ev.task_type != "regression":
+            errors.append(
+                f"evaluators[{i}].type '{ev.type}' is only valid for task_type='regression'."
+            )
+
     return errors
 
 
@@ -279,6 +326,14 @@ def config_from_dict(d: dict) -> PipelineConfig:
         if k in OutputConfig.__dataclass_fields__
     })
 
+    evaluators = [
+        EvaluatorConfig(**{
+            k: v for k, v in ev.items()
+            if k in EvaluatorConfig.__dataclass_fields__
+        })
+        for ev in d.get("evaluators", [])
+    ]
+
     return PipelineConfig(
         data=data,
         preprocessing=preprocessing,
@@ -288,6 +343,7 @@ def config_from_dict(d: dict) -> PipelineConfig:
         comparisons=comparisons,
         score_matrix=score_matrix,
         output=output,
+        evaluators=evaluators,
     )
 
 

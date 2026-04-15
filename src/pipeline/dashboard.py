@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 try:
     import panel as pn
-    from bokeh.models import Band, ColumnDataSource, HoverTool, Legend, LegendItem
+    from bokeh.models import Band, ColumnDataSource, CustomJS, HoverTool, Legend, LegendItem, Select
     from bokeh.palettes import Category10_10
     from bokeh.plotting import figure
 
@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 _CLF_METRICS = [
     ("accuracy", "Accuracy"),
-    ("f1", "F1"),
+    ("macro_f1", "Macro F1"),
 ]
 
 _REG_METRICS = [
@@ -48,7 +48,7 @@ _REG_METRICS = [
 
 _BASELINE_CLF = {
     "accuracy": ("accuracy_mean", "accuracy_std"),
-    "f1": ("f1_mean", "f1_std"),
+    "macro_f1": ("f1_mean", "f1_std"),   # baseline CSV columns keep old names
 }
 
 _BASELINE_REG = {
@@ -502,14 +502,134 @@ def _build_metrics_table(
 # Selector details accordion
 # ---------------------------------------------------------------------------
 
+def _build_evaluator_comparison_plots(
+    sel_label: str,
+    target_name: str,
+    evaluator_histories: dict[str, list[dict]],
+) -> "pn.Column | None":
+    """Build per-evaluator comparison Bokeh figures for a single selector.
+
+    Returns a ``pn.Column`` with a header and one figure per metric, or
+    ``None`` if fewer than 2 evaluators are available for this selector.
+    """
+    # Collect matching histories: {ev_label: list_of_step_dicts}
+    matching: dict[str, list[dict]] = {}
+    prefix = f"{sel_label}__{target_name}__"
+    for key, history in evaluator_histories.items():
+        if key.startswith(prefix):
+            ev_label = key[len(prefix):]
+            matching[ev_label] = history
+
+    if len(matching) < 2:
+        return None
+
+    # Deduce metric keys from data (exclude "step")
+    all_metric_keys: list[str] = []
+    for history in matching.values():
+        for entry in history:
+            for k in entry:
+                if k != "step" and k not in all_metric_keys:
+                    all_metric_keys.append(k)
+        if all_metric_keys:
+            break
+
+    if not all_metric_keys:
+        return None
+
+    ev_labels = sorted(matching.keys())
+    color_map = _get_color_map(ev_labels)
+
+    figures_panes: list = []
+
+    for metric_key in all_metric_keys:
+        p = figure(
+            title=f"{metric_key} vs Feature Count — Evaluator Comparison",
+            x_axis_label="Number of Features",
+            y_axis_label=metric_key,
+            width=420,
+            height=300,
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+            sizing_mode="stretch_width",
+        )
+
+        legend_items: list[LegendItem] = []
+
+        for ev_label in ev_labels:
+            history = matching[ev_label]
+            steps = []
+            values = []
+            for entry in history:
+                step = entry.get("step")
+                val = entry.get(metric_key)
+                if step is not None and val is not None:
+                    steps.append(step)
+                    values.append(val)
+
+            if not steps:
+                continue
+
+            source = ColumnDataSource(data=dict(
+                x=steps,
+                y=values,
+                label=[ev_label] * len(steps),
+            ))
+
+            line = p.line(
+                "x", "y", source=source,
+                line_width=2, color=color_map[ev_label],
+            )
+            circle = p.scatter(
+                "x", "y", source=source,
+                size=6, color=color_map[ev_label],
+            )
+            legend_items.append(LegendItem(label=ev_label, renderers=[line, circle]))
+
+            hover = HoverTool(
+                renderers=[circle],
+                tooltips=[
+                    ("Evaluator", "@label"),
+                    ("Features", "@x"),
+                    (metric_key, "@y{0.0000}"),
+                ],
+            )
+            p.add_tools(hover)
+
+        if legend_items:
+            legend = Legend(items=legend_items, location="top_left")
+            legend.click_policy = "hide"
+            legend.label_text_font_size = "11pt"
+            p.add_layout(legend, "right")
+
+        p.title.text_font_size = "13pt"
+        p.xaxis.axis_label_text_font_size = "12pt"
+        p.yaxis.axis_label_text_font_size = "12pt"
+        p.xaxis.major_label_text_font_size = "11pt"
+        p.yaxis.major_label_text_font_size = "11pt"
+        p.xaxis.minor_tick_line_color = None
+        p.grid.grid_line_alpha = 0.4
+
+        figures_panes.append(pn.pane.Bokeh(p, sizing_mode="stretch_width"))
+
+    if not figures_panes:
+        return None
+
+    return pn.Column(
+        pn.pane.Markdown("### 📊 Evaluator Comparison"),
+        *figures_panes,
+        sizing_mode="stretch_width",
+    )
+
+
 def _build_selector_details(
     target_results: dict[str, "SelectionResult"],
     config: "PipelineConfig",
+    target_name: str = "",
+    evaluator_histories: dict[str, list[dict]] | None = None,
 ) -> "pn.Accordion":
     """Build accordion with per-selector detail panels."""
     from ..results import WrapperSelectionResult
 
-    panels: list[tuple[str, pn.pane.HTML]] = []
+    panels: list[tuple[str, pn.Column]] = []
 
     for label, result in target_results.items():
         # Selected features list
@@ -576,7 +696,21 @@ def _build_selector_details(
         html = html.replace(
             "<td>", '<td style="padding: 3px 10px; border-bottom: 1px solid #eee;">'
         )
-        panels.append((f"🏷 {label}", pn.pane.HTML(html, sizing_mode="stretch_width")))
+
+        panel_components: list = [pn.pane.HTML(html, sizing_mode="stretch_width")]
+
+        # Task 8 — evaluator comparison plots for this selector
+        if target_name and evaluator_histories:
+            comparison_col = _build_evaluator_comparison_plots(
+                label, target_name, evaluator_histories
+            )
+            if comparison_col is not None:
+                panel_components.append(comparison_col)
+
+        panels.append((
+            f"🏷 {label}",
+            pn.Column(*panel_components, sizing_mode="stretch_width"),
+        ))
 
     accordion = pn.Accordion(*panels, sizing_mode="stretch_width")
     return accordion
@@ -586,17 +720,277 @@ def _build_selector_details(
 # Per-target tab
 # ---------------------------------------------------------------------------
 
+def _build_evaluator_dropdown_section(
+    target_name: str,
+    task_type: str,
+    target_results: dict[str, "SelectionResult"],
+    evaluator_histories: dict[str, list[dict]],
+) -> "list":
+    """Build a Bokeh Select widget + CustomJS that switches the performance-curve
+    ColumnDataSources between the built-in selector evaluator and any named
+    external evaluators stored in *evaluator_histories*.
+
+    Returns a list of Panel components to prepend to the performance-curves
+    section, or an empty list if there is nothing to show.
+
+    The function also returns the perf_plots column itself (built here so that
+    all ColumnDataSources are available for the CustomJS callbacks).
+    """
+    import json as _json
+
+    # -----------------------------------------------------------------------
+    # Collect evaluator labels relevant to this target
+    # -----------------------------------------------------------------------
+    suffix_map: dict[str, str] = {}  # ev_label -> full suffix pattern
+    for key in evaluator_histories:
+        parts = key.split("__")
+        # key format: "{selector_label}__{target_name}__{evaluator_label}"
+        # target_name may itself contain "__", so we check from the right:
+        # last part is ev_label, second-to-last onwards up to first part is
+        # built as "{selector}__{target}", so we match the target in position [-2]
+        if len(parts) >= 3:
+            # rebuild target from middle parts
+            ev_label = parts[-1]
+            tname_from_key = parts[-2]
+            # simple match: direct comparison of second-to-last segment
+            # (works when target_name has no "__")
+            if tname_from_key == target_name:
+                suffix_map[ev_label] = ev_label  # just track that it exists
+
+    # Rebuild properly: collect all ev_labels whose keys contain this target
+    ev_labels_set: set[str] = set()
+    prefix_for_target = f"__{target_name}__"
+    for key in evaluator_histories:
+        if prefix_for_target in key:
+            ev_label = key.split(prefix_for_target, 1)[-1]
+            ev_labels_set.add(ev_label)
+
+    sorted_ev_labels = sorted(ev_labels_set)
+
+    if not sorted_ev_labels:
+        return [], None  # type: ignore[return-value]
+
+    # -----------------------------------------------------------------------
+    # Build data structures for the original (selector-time) performance data
+    # and for each evaluator, per selector, per metric
+    # -----------------------------------------------------------------------
+    metrics = _CLF_METRICS if task_type == "classification" else _REG_METRICS
+    labels = list(target_results.keys())
+    color_map = _get_color_map(labels)
+
+    # original_data[selector_label][metric_key] = {"x": [...], "y": [...]}
+    original_data: dict[str, dict[str, dict]] = {}
+    for sel_label, result in target_results.items():
+        original_data[sel_label] = {}
+        for metric_key, _ in metrics:
+            steps, values = [], []
+            for entry in result.performance_history:
+                step = entry.get("step")
+                val = entry.get(metric_key)
+                if step is not None and val is not None:
+                    steps.append(step)
+                    values.append(val)
+            original_data[sel_label][metric_key] = {"x": steps, "y": values}
+
+    # ev_data[ev_label][selector_label][metric_key] = {"x": [...], "y": [...]}
+    ev_data: dict[str, dict[str, dict[str, dict]]] = {}
+    for ev_label in sorted_ev_labels:
+        ev_data[ev_label] = {}
+        for sel_label in labels:
+            ev_data[ev_label][sel_label] = {}
+            key = f"{sel_label}__{target_name}__{ev_label}"
+            history = evaluator_histories.get(key, [])
+            for metric_key, _ in metrics:
+                steps, values = [], []
+                for entry in history:
+                    step = entry.get("step")
+                    val = entry.get(metric_key)
+                    if step is not None and val is not None:
+                        steps.append(step)
+                        values.append(val)
+                ev_data[ev_label][sel_label][metric_key] = {"x": steps, "y": values}
+
+    # -----------------------------------------------------------------------
+    # Build Bokeh figures + ColumnDataSources (one source per selector per fig)
+    # -----------------------------------------------------------------------
+    baseline_map = _BASELINE_CLF if task_type == "classification" else _BASELINE_REG
+
+    # sources[metric_key][selector_label] = ColumnDataSource
+    sources: dict[str, dict[str, ColumnDataSource]] = {}
+    figures_list: list = []
+
+    for metric_key, metric_label in metrics:
+        sources[metric_key] = {}
+        p = figure(
+            title=f"{metric_label} vs Feature Count",
+            x_axis_label="Number of Features",
+            y_axis_label=metric_label,
+            width=420,
+            height=320,
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+            sizing_mode="stretch_width",
+        )
+
+        legend_items: list[LegendItem] = []
+
+        for sel_label, result in target_results.items():
+            od = original_data[sel_label][metric_key]
+            source = ColumnDataSource(data=dict(
+                x=od["x"],
+                y=od["y"],
+                label=[sel_label] * len(od["x"]),
+            ))
+            sources[metric_key][sel_label] = source
+
+            line = p.line("x", "y", source=source,
+                          line_width=2, color=color_map[sel_label])
+            circle = p.scatter("x", "y", source=source,
+                                size=6, color=color_map[sel_label])
+            legend_items.append(LegendItem(label=sel_label, renderers=[line, circle]))
+
+            hover = HoverTool(
+                renderers=[circle],
+                tooltips=[
+                    ("Selector", "@label"),
+                    ("Features", "@x"),
+                    (metric_label, "@y{0.0000}"),
+                ],
+            )
+            p.add_tools(hover)
+
+        if legend_items:
+            legend = Legend(items=legend_items, location="top_left")
+            legend.click_policy = "hide"
+            legend.label_text_font_size = "11pt"
+            legend.stylesheets.append("""
+:host {
+    max-height: 280px;
+    overflow-y: auto;
+}
+""")
+            p.add_layout(legend, "right")
+
+        p.title.text_font_size = "13pt"
+        p.xaxis.axis_label_text_font_size = "12pt"
+        p.yaxis.axis_label_text_font_size = "12pt"
+        p.xaxis.major_label_text_font_size = "11pt"
+        p.yaxis.major_label_text_font_size = "11pt"
+        p.xaxis.minor_tick_line_color = None
+        p.grid.grid_line_alpha = 0.4
+
+        figures_list.append(p)
+
+    # -----------------------------------------------------------------------
+    # Serialize ALL data as JSON for the CustomJS callback
+    # Structure: {"[Selection evaluator]": {sel: {metric: {x,y}}},
+    #             ev_label1: {sel: {metric: {x,y}}}, ...}
+    # -----------------------------------------------------------------------
+    all_data_for_js: dict[str, dict] = {"[Selection evaluator]": original_data}
+    all_data_for_js.update(ev_data)
+    all_data_json = _json.dumps(all_data_for_js, separators=(",", ":"))
+
+    # -----------------------------------------------------------------------
+    # Build CustomJS callback
+    # args: sources dict flat-keyed as "metric_key__selector_label", plus "all_data"
+    # -----------------------------------------------------------------------
+    # Build the args dict for CustomJS
+    cb_sources: dict[str, ColumnDataSource] = {}
+    for metric_key in sources:
+        for sel_label, src in sources[metric_key].items():
+            # make a JS-safe key
+            js_key = f"{metric_key}___{sel_label}"
+            cb_sources[js_key] = src
+
+    # Build JS source-key index as a nested object literal
+    # js_index[metric_key][sel_label] = js_key
+    metric_keys_js = [mk for mk, _ in metrics]
+    sel_labels_js = labels
+
+    # We pass all_data as a ColumnDataSource with a single column "json"
+    # (trick to pass arbitrary string data into CustomJS args)
+    data_carrier = ColumnDataSource(data={"json": [all_data_json]})
+
+    callback_code = """
+var chosen = cb_obj.value;
+var all_data_json = data_carrier.data['json'][0];
+var all_data = JSON.parse(all_data_json);
+var ev_data = all_data[chosen] || all_data['[Selection evaluator]'];
+
+var metric_keys = """ + _json.dumps(metric_keys_js) + """;
+var sel_labels = """ + _json.dumps(sel_labels_js) + """;
+
+for (var mi = 0; mi < metric_keys.length; mi++) {
+    var mk = metric_keys[mi];
+    for (var si = 0; si < sel_labels.length; si++) {
+        var sl = sel_labels[si];
+        var js_key = mk + '___' + sl;
+        var src = sources[js_key];
+        if (!src) continue;
+        var sel_ev = ev_data[sl];
+        if (!sel_ev) continue;
+        var metric_dat = sel_ev[mk];
+        if (!metric_dat) continue;
+        src.data['x'] = metric_dat['x'].slice();
+        src.data['y'] = metric_dat['y'].slice();
+        src.data['label'] = metric_dat['x'].map(function() { return sl; });
+        src.change.emit();
+    }
+}
+"""
+
+    cb_args = dict(sources=cb_sources, data_carrier=data_carrier)
+    callback = CustomJS(args=cb_args, code=callback_code)
+
+    # -----------------------------------------------------------------------
+    # Build the Bokeh Select widget
+    # -----------------------------------------------------------------------
+    dropdown_options = ["[Selection evaluator]"] + sorted_ev_labels
+    select_widget = Select(
+        title="Evaluator:",
+        value="[Selection evaluator]",
+        options=dropdown_options,
+        width=320,
+    )
+    select_widget.js_on_change("value", callback)
+
+    select_pane = pn.pane.Bokeh(select_widget, sizing_mode="fixed")
+    bokeh_panes = [pn.pane.Bokeh(fig, sizing_mode="stretch_width") for fig in figures_list]
+    perf_col = pn.Column(*bokeh_panes, sizing_mode="stretch_width")
+
+    return [select_pane], perf_col
+
+
 def _build_target_tab(
     target_name: str,
     task_type: str,
     target_results: dict[str, "SelectionResult"],
     baseline: pd.DataFrame | None,
     config: "PipelineConfig",
+    evaluator_histories: dict[str, list[dict]] | None = None,
 ) -> "pn.Column":
     """Build a complete tab for one target variable."""
-    perf_plots = _build_performance_plots(target_results, task_type, baseline)
     metrics_table = _build_metrics_table(target_results, task_type)
-    selector_details = _build_selector_details(target_results, config)
+    selector_details = _build_selector_details(
+        target_results, config, target_name=target_name,
+        evaluator_histories=evaluator_histories,
+    )
+
+    # ---- Performance curves section --------------------------------------
+    # If evaluator_histories has data for this target we build a switchable
+    # version; otherwise fall back to the static helper.
+    perf_header = pn.pane.HTML("<h3>📈 Performance Curves</h3>", sizing_mode="stretch_width")
+    extra_widgets: list = []
+
+    if evaluator_histories:
+        extra_widgets, perf_plots = _build_evaluator_dropdown_section(
+            target_name, task_type, target_results, evaluator_histories
+        )
+        if perf_plots is None:
+            # No evaluator data matched — fall back to static plots
+            perf_plots = _build_performance_plots(target_results, task_type, baseline)
+            extra_widgets = []
+    else:
+        perf_plots = _build_performance_plots(target_results, task_type, baseline)
 
     return pn.Column(
         pn.pane.HTML(
@@ -604,7 +998,8 @@ def _build_target_tab(
             f"<span style='font-size: 0.7em; color: #888;'>({task_type})</span></h2>",
             sizing_mode="stretch_width",
         ),
-        pn.pane.HTML("<h3>📈 Performance Curves</h3>", sizing_mode="stretch_width"),
+        perf_header,
+        *extra_widgets,
         perf_plots,
         metrics_table,
         pn.pane.HTML("<h3>🔍 Selector Details</h3>", sizing_mode="stretch_width"),
@@ -1003,6 +1398,7 @@ def generate_dashboard(
     results: dict[str, "SelectionResult"],
     baselines: dict[str, pd.DataFrame],
     config: "PipelineConfig",
+    evaluator_histories: dict[str, list[dict]] | None = None,
 ) -> str:
     """Generate a standalone interactive HTML dashboard.
 
@@ -1016,6 +1412,12 @@ def generate_dashboard(
         Keyed by target name.
     config : PipelineConfig
         The pipeline configuration used for the run.
+    evaluator_histories : dict[str, list[dict]] | None
+        Keyed ``"{selector_label}__{target_name}__{evaluator_label}"``.
+        Each value is a list of ``{"step": int, metric: float, ...}`` dicts.
+        When provided, adds an evaluator dropdown to each target tab and
+        per-selector evaluator comparison plots.  ``None`` disables both
+        sections (backward compatible).
 
     Returns
     -------
@@ -1057,7 +1459,10 @@ def generate_dashboard(
             continue
 
         baseline = baselines.get(target_name)
-        tab_content = _build_target_tab(target_name, task_type, target_results, baseline, config)
+        tab_content = _build_target_tab(
+            target_name, task_type, target_results, baseline, config,
+            evaluator_histories=evaluator_histories,
+        )
         tabs_list.append((f"🎯 {target_name}", tab_content))
 
     target_tabs = pn.Tabs(*tabs_list, sizing_mode="stretch_width") if tabs_list else pn.Column()

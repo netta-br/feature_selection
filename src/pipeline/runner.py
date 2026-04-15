@@ -43,6 +43,8 @@ class Pipeline:
         self.baselines: dict[str, pd.DataFrame] = {}     # target_name -> baseline summary
         self._data: DataBundle | None = None
         self._output_dir: str | None = None
+        self.evaluator_histories: dict[str, list[dict]] = {}
+        # keyed "{selector_label}__{target_name}__{evaluator_label}"
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -73,6 +75,9 @@ class Pipeline:
         # 5. Run selectors (per selector × per target)
         self._run_selectors()
 
+        # 5b. Compute evaluator performance histories
+        self._run_evaluator_histories()
+
         # 6. Run comparisons
         self._run_comparisons()
 
@@ -82,7 +87,8 @@ class Pipeline:
                 from .dashboard import generate_dashboard  # type: ignore[import-not-found]
 
                 generate_dashboard(
-                    self._output_dir, self.results, self.baselines, self.config
+                    self._output_dir, self.results, self.baselines, self.config,
+                    evaluator_histories=self.evaluator_histories,
                 )
             except ImportError:
                 log.warning(
@@ -279,6 +285,30 @@ class Pipeline:
             for result_key, result in cached_results.items():
                 self.results[result_key] = result
                 remaining.discard(result_key)
+
+                # Recompute performance_history if stale (e.g. old nested format
+                # from a pre-evaluator-refactor run, or empty despite having features)
+                target_name = result_key.rsplit("__", 1)[-1]
+                target_cfg = next(
+                    (t for t in self.config.targets if t.name == target_name), None
+                )
+                if target_cfg and not self._is_perf_history_valid(result):
+                    sel_cfg = next(
+                        (s for s in self.config.selectors
+                         if s.label == result_key.rsplit("__", 1)[0]),
+                        None,
+                    )
+                    eval_every_k = (
+                        sel_cfg.params.get(
+                            "eval_every_k",
+                            sel_cfg.params.get("test_eval_every_k", 1),
+                        )
+                        if sel_cfg else 1
+                    )
+                    self._recompute_selector_perf_history(
+                        result_key, result, target_cfg, eval_every_k=eval_every_k
+                    )
+
             log.info(
                 "Cache: %d hit(s), %d selector(s) to compute",
                 len(cached_results),
@@ -516,6 +546,246 @@ class Pipeline:
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary_records, f, indent=2, default=str)
             log.info("Saved summary: %s", summary_path)
+
+    # ------------------------------------------------------------------
+    # Evaluator helpers
+    # ------------------------------------------------------------------
+
+    def _make_evaluator(self, ev_cfg: "EvaluatorConfig") -> "Evaluator":
+        """Instantiate an Evaluator from config."""
+        from ..evaluation.evaluator import (
+            LogisticRegressionEvaluator, LinearRegressionEvaluator,
+            KNNEvaluator, NaiveBayesEvaluator,
+        )
+        factories = {
+            "logistic_regression": LogisticRegressionEvaluator,
+            "linear_regression":   LinearRegressionEvaluator,
+            "knn":                 KNNEvaluator,
+            "naive_bayes":         NaiveBayesEvaluator,
+        }
+        ev = factories[ev_cfg.type](ev_cfg.params or None)
+        ev.label = ev_cfg.label
+        return ev
+
+    def _default_evaluators(self) -> list["EvaluatorConfig"]:
+        """Return one default EvaluatorConfig per target task type when config.evaluators is empty."""
+        from .config_schema import EvaluatorConfig
+        task_types = {t.task_type for t in self.config.targets}
+        defaults = []
+        if "classification" in task_types:
+            defaults.append(EvaluatorConfig(
+                label="LogisticRegression",
+                type="logistic_regression",
+                task_type="classification",
+                params={},
+            ))
+        if "regression" in task_types:
+            defaults.append(EvaluatorConfig(
+                label="LinearRegression",
+                type="linear_regression",
+                task_type="regression",
+                params={},
+            ))
+        return defaults
+
+    # ------------------------------------------------------------------
+    # Performance-history validity helpers
+    # ------------------------------------------------------------------
+
+    # Expected flat metric keys per task type (must match Evaluator.evaluate output)
+    _CLF_EXPECTED_KEYS: frozenset[str] = frozenset({"accuracy", "macro_f1"})
+    _REG_EXPECTED_KEYS: frozenset[str] = frozenset({"r2", "mse", "mae"})
+
+    def _is_perf_history_valid(self, result: "SelectionResult") -> bool:
+        """Return True if *result.performance_history* has the expected flat keys.
+
+        A history is considered invalid when:
+        - It is empty while ``selected_features`` is non-empty (never evaluated), OR
+        - The first entry is missing an expected flat key (e.g. old nested
+          ``classification_report`` format that has ``'macro avg'`` instead of
+          ``'macro_f1'``).
+        """
+        if not result.performance_history:
+            # Empty history is fine only when there are no selected features
+            return not bool(result.selected_features)
+
+        expected = (
+            self._CLF_EXPECTED_KEYS
+            if result.task_type == "classification"
+            else self._REG_EXPECTED_KEYS
+        )
+        # Spot-check the first entry; if it has the keys, assume uniformity
+        return expected.issubset(result.performance_history[0].keys())
+
+    def _recompute_selector_perf_history(
+        self,
+        result_key: str,
+        result: "SelectionResult",
+        target_cfg: "TargetConfig",
+        eval_every_k: int = 1,
+    ) -> None:
+        """Recompute *result.performance_history* in-place using the default evaluator.
+
+        The selector itself is **not** re-run — only the incremental evaluation
+        over the already-selected feature list is repeated.  The result is
+        patched in-place and re-saved to the current output directory so the
+        on-disk JSON is also up-to-date.
+
+        Parameters
+        ----------
+        result_key:
+            The ``"{label}__{target}"`` key used to name the output JSON.
+        result:
+            The cached :class:`~..results.SelectionResult` to patch.
+        target_cfg:
+            Target configuration; used to select the appropriate default evaluator.
+        eval_every_k:
+            Evaluation step size (from the selector's params).
+        """
+        from ..evaluation.evaluator import Evaluator
+
+        target_data = self._data.targets[target_cfg.name]
+        X_eval = (
+            self._data.X_test
+            if self.config.preprocessing.eval_data_source == "test"
+            else self._data.X_val
+        )
+        y_eval = (
+            target_data.y_test
+            if self.config.preprocessing.eval_data_source == "test"
+            else target_data.y_val
+        )
+
+        # Pick the matching default evaluator for this task type
+        defaults = self._default_evaluators()
+        ev_cfg = next(
+            (e for e in defaults if e.task_type == target_cfg.task_type), None
+        )
+        if ev_cfg is None:
+            log.warning(
+                "No default evaluator for task_type '%s'; "
+                "skipping perf history recompute for '%s'",
+                target_cfg.task_type, result_key,
+            )
+            return
+
+        ev = self._make_evaluator(ev_cfg)
+        log.info(
+            "Recomputing stale performance_history for cached result '%s' using %s",
+            result_key, ev_cfg.label,
+        )
+
+        try:
+            history = Evaluator.calculate_performance_history(
+                X_train=self._data.X_train,
+                y_train=target_data.y_train,
+                X_test=X_eval,
+                y_test=y_eval,
+                selected_features=result.selected_features,
+                evaluator=ev,
+                eval_every_k=eval_every_k,
+            )
+        except Exception as exc:
+            log.error(
+                "Failed to recompute performance_history for '%s': %s",
+                result_key, exc,
+            )
+            return
+
+        # Patch the result object in-place
+        result.performance_history = history
+        result.final_metrics = history[-1] if history else None
+
+        # Re-save to current output dir so the on-disk JSON is also up-to-date
+        if self.config.output.save_results_json:
+            result_path = os.path.join(self._output_dir, f"{result_key}.json")
+            try:
+                result.save_as_json(result_path)
+                log.info("Re-saved updated result with fresh perf history: %s", result_path)
+            except OSError as exc:
+                log.warning(
+                    "Could not re-save result '%s': %s", result_path, exc
+                )
+
+    def _run_evaluator_histories(self) -> None:
+        """Compute and save performance history for each (selector, target, evaluator) triple.
+
+        ``eval_every_k`` is taken from each :class:`EvaluatorConfig` — it is
+        independent of the selector's own step size and allows backfilling
+        evaluations at arbitrary granularities without re-running selection.
+        # TODO (config_editor): ensure eval_every_k is exposed as a numeric
+        #   input in the Evaluators section of tools/config_editor.html.
+        """
+        from ..evaluation.evaluator import Evaluator
+
+        evaluator_cfgs = self.config.evaluators or self._default_evaluators()
+
+        for selector in self.config.selectors:
+            if not selector.enabled:
+                continue
+
+            for target_name in selector.targets:
+                result_key = f"{selector.label}__{target_name}"
+                if result_key not in self.results:
+                    log.warning("Skipping evaluator histories for missing result: %s", result_key)
+                    continue
+
+                target_cfg = next((t for t in self.config.targets if t.name == target_name), None)
+                if target_cfg is None:
+                    continue
+
+                selected_features = self.results[result_key].selected_features
+                target_data = self._data.targets[target_name]
+
+                X_eval = (
+                    self._data.X_test
+                    if self.config.preprocessing.eval_data_source == "test"
+                    else self._data.X_val
+                )
+                y_eval = (
+                    target_data.y_test
+                    if self.config.preprocessing.eval_data_source == "test"
+                    else target_data.y_val
+                )
+
+                for ev_cfg in evaluator_cfgs:
+                    if ev_cfg.task_type != target_cfg.task_type:
+                        continue
+
+                    ev = self._make_evaluator(ev_cfg)
+                    log.info(
+                        "Computing evaluator history: %s / %s / %s (eval_every_k=%d)",
+                        selector.label, target_name, ev_cfg.label, ev_cfg.eval_every_k,
+                    )
+
+                    try:
+                        history = Evaluator.calculate_performance_history(
+                            X_train=self._data.X_train,
+                            y_train=target_data.y_train,
+                            X_test=X_eval,
+                            y_test=y_eval,
+                            selected_features=selected_features,
+                            evaluator=ev,
+                            eval_every_k=ev_cfg.eval_every_k,
+                        )
+                    except Exception as e:
+                        log.error(
+                            "Evaluator history failed for %s / %s / %s: %s",
+                            selector.label, target_name, ev_cfg.label, e,
+                        )
+                        continue
+
+                    hist_key = f"{selector.label}__{target_name}__{ev_cfg.label}"
+                    self.evaluator_histories[hist_key] = history
+
+                    if self.config.output.save_results_json:
+                        safe_sel = selector.label.replace(" ", "_").replace("/", "_")
+                        safe_ev  = ev_cfg.label.replace(" ", "_").replace("/", "_")
+                        filename = f"perf_history__{safe_sel}__{target_name}__{safe_ev}.json"
+                        path = os.path.join(self._output_dir, filename)
+                        with open(path, "w", encoding="utf-8") as f:
+                            json.dump(history, f, indent=2, default=str)
+                        log.info("Saved evaluator history: %s", path)
 
     # ------------------------------------------------------------------
     # Config copy
