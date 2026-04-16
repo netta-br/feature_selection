@@ -1,0 +1,134 @@
+{
+  "data": {
+    "features_path": "feature_selection/data/SCANB.csv",
+    "labels_path": "feature_selection/data/sampleinfo_SCANB_t.csv",
+    "sample_id_column": "samplename",
+    "auto_transpose": true,
+    "fillna_value": 0
+  },
+  "preprocessing": {
+    "random_seed": 2,
+    "train_pct": 0.7,
+    "val_pct": 0.1,
+    "test_pct": 0.2,
+    "eval_data_source": "validation"
+  },
+  "targets": [
+    {
+      "name": "Lympho",
+      "task_type": "regression"
+    }
+  ],
+  "baseline": {
+    "enabled": true,
+    "num_runs": 10,
+    "eval_feature_counts": "from_selectors"
+  },
+  "selectors": [
+    {
+      "label": "mRmR-Pearson",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "pearson",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho"
+      ]
+    },
+    {
+      "label": "IWSS-MB-3minFold",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 20,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho"
+      ]
+    },
+    {
+      "label": "IWSS-MB-2minFold",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 2,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 20,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho"
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "label": "All selectors",
+      "target": "Lympho",
+      "selectors": [
+        "mRmR-Pearson",
+        "IWSS-MB-3minFold",
+        "IWSS-MB-2minFold"
+      ],
+      "include_baseline": true,
+      "type": "compare_results"
+    },
+    {
+      "label": "2 vs 3 Fold",
+      "target": "Lympho",
+      "selectors": [
+        "IWSS-MB-3minFold",
+        "IWSS-MB-2minFold"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "all selectors - summary",
+      "target": "Lympho",
+      "selectors": [
+        "mRmR-Pearson",
+        "IWSS-MB-3minFold",
+        "IWSS-MB-2minFold"
+      ],
+      "include_baseline": true,
+      "type": "summary_report"
+    }
+  ],
+  "score_matrix": {
+    "random_forest": {
+      "n_estimators": 100,
+      "max_depth": null
+    },
+    "mutual_information": {
+      "n_neighbors": 3
+    }
+  },
+  "output": {
+    "base_dir": "./output",
+    "save_results_json": true,
+    "generate_dashboard": true,
+    "fetch_past_results": true
+  }
+}

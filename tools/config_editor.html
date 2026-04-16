@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Config Editor</title>
+<style>
+/* ── Reset & Base ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f5f7;
+  color: #1e1e2f;
+  line-height: 1.5;
+  padding-bottom: 80px;
+}
+
+/* ── Actions Bar (sticky top) ────────────────────────────── */
+.actions-bar {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; flex-wrap: wrap; gap: 8px;
+  align-items: center; justify-content: center;
+  background: #fff; border-bottom: 1px solid #d0d5dd;
+  padding: 10px 20px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.06);
+}
+.actions-bar button, .actions-bar label.btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 16px; border: 1px solid #d0d5dd; border-radius: 6px;
+  background: #fff; color: #344054; font-size: .875rem;
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.actions-bar button:hover, .actions-bar label.btn:hover {
+  background: #f2f4f7; border-color: #98a2b3;
+}
+.actions-bar .btn-primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+.actions-bar .btn-primary:hover { background: #1d4ed8; }
+.actions-bar .btn-danger { color: #d92d20; border-color: #fda29b; }
+.actions-bar .btn-danger:hover { background: #fef3f2; }
+.actions-bar .btn-success { background: #12b76a; color: #fff; border-color: #12b76a; }
+.actions-bar .btn-success:hover { background: #039855; }
+#uploadInput { display: none; }
+
+/* ── Container ───────────────────────────────────────────── */
+.container { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+
+/* ── Section Cards ───────────────────────────────────────── */
+.section {
+  background: #fff; border: 1px solid #e4e7ec; border-radius: 10px;
+  margin-bottom: 16px; overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px; cursor: pointer; user-select: none;
+  background: #fafbfc; border-bottom: 1px solid #e4e7ec;
+  transition: background .15s;
+}
+.section-header:hover { background: #f2f4f7; }
+.section-header h2 { font-size: 1rem; font-weight: 600; }
+.section-header .arrow {
+  display: inline-block; transition: transform .2s;
+  font-size: .75rem; color: #667085;
+}
+.section-header .arrow.collapsed { transform: rotate(-90deg); }
+.section-body { padding: 20px; }
+.section-body.hidden { display: none; }
+
+/* ── Form Row ────────────────────────────────────────────── */
+.form-row {
+  display: grid; grid-template-columns: 200px 1fr; gap: 8px 12px;
+  align-items: center; margin-bottom: 12px;
+}
+.form-row label {
+  font-size: .85rem; font-weight: 500; color: #475467;
+  text-align: right; padding-right: 4px;
+}
+.form-row input[type="text"],
+.form-row input[type="number"],
+.form-row select {
+  width: 100%; padding: 7px 10px; border: 1px solid #d0d5dd;
+  border-radius: 6px; font-size: .875rem; background: #fff;
+  transition: border-color .15s;
+}
+.form-row input:focus, .form-row select:focus {
+  outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+}
+.form-row input:disabled, .form-row select:disabled {
+  background: #f2f4f7; color: #98a2b3;
+}
+.form-row .checkbox-wrap {
+  display: flex; align-items: center; gap: 6px;
+}
+.form-row .checkbox-wrap input[type="checkbox"] {
+  width: 16px; height: 16px; accent-color: #2563eb;
+}
+
+/* ── Nullable field ──────────────────────────────────────── */
+.nullable-wrap {
+  display: flex; align-items: center; gap: 8px;
+}
+.nullable-wrap input[type="text"],
+.nullable-wrap input[type="number"] { flex: 1; }
+.nullable-wrap .null-toggle {
+  display: flex; align-items: center; gap: 3px;
+  font-size: .75rem; color: #667085; white-space: nowrap;
+}
+.nullable-wrap .null-toggle input { width: 14px; height: 14px; accent-color: #667085; }
+
+/* ── Dynamic array items ─────────────────────────────────── */
+.array-item {
+  position: relative;
+  border: 1px solid #e4e7ec; border-radius: 8px;
+  padding: 16px 16px 12px; margin-bottom: 12px;
+  background: #fafbfc;
+}
+.array-item .remove-btn {
+  position: absolute; top: 8px; right: 10px;
+  background: none; border: none; color: #d92d20; cursor: pointer;
+  font-size: .8rem; padding: 2px 6px; border-radius: 4px;
+  opacity: .7; transition: opacity .15s, background .15s;
+}
+.array-item .remove-btn:hover { opacity: 1; background: #fef3f2; }
+
+.add-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 14px; border: 1px dashed #98a2b3; border-radius: 6px;
+  background: none; color: #475467; cursor: pointer; font-size: .85rem;
+  transition: border-color .15s, color .15s;
+}
+.add-btn:hover { border-color: #2563eb; color: #2563eb; }
+
+/* ── Target checkboxes in selectors ──────────────────────── */
+.target-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.target-checks label { display: flex; align-items: center; gap: 4px; font-size: .85rem; }
+
+/* ── Selector checkboxes in comparisons ──────────────────── */
+.selector-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.selector-checks label { display: flex; align-items: center; gap: 4px; font-size: .85rem; }
+
+/* ── Validation ──────────────────────────────────────────── */
+.validation-msg {
+  padding: 10px 20px; margin: 0 auto 12px; max-width: 900px;
+  border-radius: 8px; font-size: .875rem; display: none;
+}
+.validation-msg.error { display: block; background: #fef3f2; color: #b42318; border: 1px solid #fda29b; }
+.validation-msg.success { display: block; background: #ecfdf3; color: #027a48; border: 1px solid #6ce9a6; }
+.inline-warn {
+  font-size: .78rem; color: #dc6803; margin-top: 2px;
+  grid-column: 2;
+}
+
+/* ── Responsive ──────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .form-row { grid-template-columns: 1fr; }
+  .form-row label { text-align: left; }
+  .actions-bar { padding: 8px 10px; }
+}
+
+/* ── Drag-drop overlay ───────────────────────────────────── */
+.drop-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(37,99,235,.12);
+  border: 3px dashed #2563eb;
+  align-items: center; justify-content: center;
+  font-size: 1.3rem; color: #2563eb; font-weight: 600;
+}
+.drop-overlay.active { display: flex; }
+
+/* ── Sub-header inside array items ───────────────────────── */
+.array-item-header {
+  font-weight: 600; font-size: .9rem; margin-bottom: 10px; color: #344054;
+}
+
+/* ── Params sub-section ──────────────────────────────────── */
+.params-section {
+  border-top: 1px solid #e4e7ec; margin-top: 12px; padding-top: 12px;
+}
+.params-section .params-title {
+  font-size: .82rem; font-weight: 600; color: #667085;
+  margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px;
+}
+
+/* ── Evaluator item cards ─────────────────────────────────── */
+.item-card {
+  position: relative;
+  border: 1px solid #e4e7ec; border-radius: 8px;
+  padding: 16px 16px 12px; margin-bottom: 12px;
+  background: #fafbfc;
+}
+
+/* ── Evaluator params sub-section ────────────────────────── */
+.ev-params-section {
+  border-top: 1px solid #e4e7ec; margin-top: 12px; padding-top: 12px;
+}
+.ev-params-section > label {
+  display: block; font-size: .82rem; font-weight: 600; color: #667085;
+  margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px;
+}
+.ev-params-list { margin-bottom: 8px; }
+.param-row {
+  display: grid; grid-template-columns: 1fr 1fr 28px; gap: 6px;
+  margin-bottom: 6px; align-items: center;
+}
+.param-row input { width: 100%; padding: 5px 8px; border: 1px solid #d0d5dd; border-radius: 5px; font-size: .82rem; }
+.param-row input:focus { outline: none; border-color: #2563eb; }
+.param-row .btn-remove-param {
+  background: none; border: none; color: #d92d20; cursor: pointer;
+  font-size: .85rem; padding: 2px 4px; border-radius: 4px;
+  opacity: .65; transition: opacity .15s;
+}
+.param-row .btn-remove-param:hover { opacity: 1; background: #fef3f2; }
+.btn-danger {
+  background: none; border: 1px solid #fda29b; color: #d92d20;
+  padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: .82rem;
+  margin-top: 8px; transition: background .15s;
+}
+.btn-danger:hover { background: #fef3f2; }
+</style>
+</head>
+<body>
+
+<!-- Drop overlay -->
+<div class="drop-overlay" id="dropOverlay">Drop JSON file here</div>
+
+<!-- Actions Bar -->
+<div class="actions-bar">
+  <label class="btn" tabindex="0">
+    &#128194; Upload JSON
+    <input type="file" id="uploadInput" accept=".json,application/json">
+  </label>
+  <button class="btn-primary" onclick="downloadJSON()">&#11015; Download JSON</button>
+  <button class="btn-success" onclick="validateAll()">&#10003; Validate</button>
+  <button class="btn-danger" onclick="resetToDefaults()">&#8635; Reset</button>
+</div>
+
+<!-- Validation message -->
+<div class="container" style="margin-bottom:0; padding-bottom:0;">
+  <div class="validation-msg" id="validationMsg"></div>
+</div>
+
+<div class="container" id="editor">
+
+<!-- ═══════════════ 1. DATA ═══════════════ -->
+<div class="section" id="sec-data">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>1. Data</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div class="form-row">
+      <label for="data-features_path">features_path</label>
+      <input type="text" id="data-features_path" value="./data/features.csv">
+    </div>
+    <div class="form-row">
+      <label for="data-labels_path">labels_path</label>
+      <input type="text" id="data-labels_path" value="./data/labels.csv">
+    </div>
+    <div class="form-row">
+      <label for="data-sample_id_column">sample_id_column</label>
+      <input type="text" id="data-sample_id_column" value="samplename">
+    </div>
+    <div class="form-row">
+      <label>auto_transpose</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="data-auto_transpose" checked>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="data-fillna_value">fillna_value</label>
+      <input type="number" id="data-fillna_value" value="0">
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 2. PREPROCESSING ═══════════════ -->
+<div class="section" id="sec-preprocessing">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>2. Preprocessing</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div class="form-row">
+      <label for="pre-random_seed">random_seed</label>
+      <input type="number" id="pre-random_seed" value="2" step="1">
+    </div>
+    <div class="form-row">
+      <label for="pre-train_pct">train_pct</label>
+      <input type="number" id="pre-train_pct" value="0.7" step="0.01" min="0" max="1">
+    </div>
+    <div class="form-row">
+      <label for="pre-val_pct">val_pct</label>
+      <input type="number" id="pre-val_pct" value="0.1" step="0.01" min="0" max="1">
+    </div>
+    <div class="form-row">
+      <label for="pre-test_pct">test_pct</label>
+      <input type="number" id="pre-test_pct" value="0.2" step="0.01" min="0" max="1">
+    </div>
+    <div class="form-row">
+      <label for="pre-eval_data_source">eval_data_source</label>
+      <select id="pre-eval_data_source">
+        <option value="validation" selected>validation</option>
+        <option value="test">test</option>
+      </select>
+    </div>
+    <div class="form-row" style="grid-template-columns:1fr;">
+      <div class="inline-warn" id="pct-warn" style="display:none; text-align:center;">
+        ⚠ Percentages sum to <span id="pct-sum"></span> (should be 1.0)
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 3. TARGETS ═══════════════ -->
+<div class="section" id="sec-targets">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>3. Targets</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div id="targets-list"></div>
+    <button class="add-btn" onclick="addTarget()">+ Add Target</button>
+  </div>
+</div>
+
+<!-- ═══════════════ 4. EVALUATORS ═══════════════ -->
+<div class="section" id="sec-evaluators">
+  <div class="section-header" style="justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:10px;cursor:pointer;flex:1;" onclick="toggleSection(this.closest('.section-header'))">
+      <h2>4. 🧪 Evaluators</h2>
+    </div>
+    <span class="arrow" style="cursor:pointer;" onclick="toggleSection(this.closest('.section-header'))">&#9660;</span>
+    <button class="add-btn" style="margin-left:12px;" onclick="addEvaluatorCard()">＋ Add Evaluator</button>
+  </div>
+  <div class="section-body">
+    <div id="evaluators-list"></div>
+  </div>
+</div>
+
+<!-- ═══════════════ 5. BASELINE ═══════════════ -->
+<div class="section" id="sec-baseline">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>5. Baseline</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div class="form-row">
+      <label>enabled</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="bl-enabled" checked>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="bl-num_runs">num_runs</label>
+      <input type="number" id="bl-num_runs" value="10" step="1" min="1">
+    </div>
+    <div class="form-row">
+      <label>eval_feature_counts</label>
+      <div>
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:4px;font-size:.85rem;font-weight:400;text-align:left;">
+            <input type="radio" name="bl-eval-mode" value="from_selectors" checked onchange="toggleBaselineCustom()"> from_selectors
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:.85rem;font-weight:400;text-align:left;">
+            <input type="radio" name="bl-eval-mode" value="custom" onchange="toggleBaselineCustom()"> custom
+          </label>
+        </div>
+        <input type="text" id="bl-custom-counts" placeholder="e.g. 5,10,15,20" style="margin-top:6px;display:none;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 6. SELECTORS ═══════════════ -->
+<div class="section" id="sec-selectors">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>6. Selectors</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div id="selectors-list"></div>
+    <button class="add-btn" onclick="addSelector()">+ Add Selector</button>
+  </div>
+</div>
+
+<!-- ═══════════════ 7. COMPARISONS ═══════════════ -->
+<div class="section" id="sec-comparisons">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>7. Comparisons</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div id="comparisons-list"></div>
+    <button class="add-btn" onclick="addComparison()">+ Add Comparison</button>
+  </div>
+</div>
+
+<!-- ═══════════════ 8. SCORE MATRIX ═══════════════ -->
+<div class="section" id="sec-score-matrix">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>8. Score Matrix</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div class="array-item-header">Random Forest</div>
+    <div class="form-row">
+      <label for="sm-rf-n_estimators">n_estimators</label>
+      <input type="number" id="sm-rf-n_estimators" value="100" min="1" step="1">
+    </div>
+    <div class="form-row">
+      <label>max_depth</label>
+      <div class="nullable-wrap">
+        <input type="number" id="sm-rf-max_depth" value="" min="1" step="1" disabled>
+        <span class="null-toggle">
+          <input type="checkbox" id="sm-rf-max_depth-null" checked onchange="toggleNull('sm-rf-max_depth', this.checked)">
+          null
+        </span>
+      </div>
+    </div>
+    <div class="array-item-header" style="margin-top:16px;">Mutual Information</div>
+    <div class="form-row">
+      <label for="sm-mi-n_neighbors">n_neighbors</label>
+      <input type="number" id="sm-mi-n_neighbors" value="3" min="1" step="1">
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 9. OUTPUT ═══════════════ -->
+<div class="section" id="sec-output">
+  <div class="section-header" onclick="toggleSection(this)">
+    <h2>9. Output</h2><span class="arrow">&#9660;</span>
+  </div>
+  <div class="section-body">
+    <div class="form-row">
+      <label for="out-base_dir">base_dir</label>
+      <input type="text" id="out-base_dir" value="./output">
+    </div>
+    <div class="form-row">
+      <label>save_results_json</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="out-save_results_json" checked>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>generate_dashboard</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="out-generate_dashboard" checked>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>fetch_past_results</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="out-fetch_past_results">
+        <span style="font-size:.82rem;color:#667085">reuse cached selector results from previous runs</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   Pipeline Config Editor — Vanilla JS
+   ══════════════════════════════════════════════════════════════ */
+
+// ── Counters for unique IDs ──────────────────────────────────
+let targetCounter = 0;
+let selectorCounter = 0;
+let comparisonCounter = 0;
+let evaluatorCounter = 0;
+
+// ── Section toggle ───────────────────────────────────────────
+function toggleSection(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.arrow');
+  body.classList.toggle('hidden');
+  arrow.classList.toggle('collapsed');
+}
+
+// ── Percentage live validation ───────────────────────────────
+function checkPctSum() {
+  const t = parseFloat(document.getElementById('pre-train_pct').value) || 0;
+  const v = parseFloat(document.getElementById('pre-val_pct').value) || 0;
+  const ts = parseFloat(document.getElementById('pre-test_pct').value) || 0;
+  const sum = t + v + ts;
+  const warn = document.getElementById('pct-warn');
+  const sumSpan = document.getElementById('pct-sum');
+  if (Math.abs(sum - 1.0) > 0.011) {
+    sumSpan.textContent = sum.toFixed(4);
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+['pre-train_pct', 'pre-val_pct', 'pre-test_pct'].forEach(id => {
+  document.getElementById(id).addEventListener('input', checkPctSum);
+});
+
+// ── Baseline custom toggle ───────────────────────────────────
+function toggleBaselineCustom() {
+  const mode = document.querySelector('input[name="bl-eval-mode"]:checked').value;
+  document.getElementById('bl-custom-counts').style.display = mode === 'custom' ? '' : 'none';
+}
+
+// ── Nullable field toggle ────────────────────────────────────
+function toggleNull(inputId, isNull) {
+  const inp = document.getElementById(inputId);
+  inp.disabled = isNull;
+  if (isNull) inp.value = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+// EVALUATORS
+// ══════════════════════════════════════════════════════════════
+const EVALUATOR_TYPES = {
+  classification: ['logistic_regression', 'knn', 'naive_bayes'],
+  regression: ['linear_regression']
+};
+
+function updateEvaluatorTypeOptions(selectEl) {
+  const card = selectEl.closest('.item-card');
+  const taskType = card.querySelector('.ev-task-type').value;
+  const typeSelect = card.querySelector('.ev-type');
+  const current = typeSelect.value;
+  const options = EVALUATOR_TYPES[taskType] || EVALUATOR_TYPES['classification'];
+  typeSelect.innerHTML = options.map(o =>
+    `<option value="${o}"${o === current ? ' selected' : ''}>${o}</option>`
+  ).join('');
+}
+
+function addEvaluatorCard(data) {
+  evaluatorCounter++;
+  const idx = evaluatorCounter;
+  data = data || {};
+  const lbl = data.label || '';
+  const taskType = data.task_type || 'classification';
+  const evType = data.type || 'logistic_regression';
+  const evalEveryK = data.eval_every_k != null ? data.eval_every_k : 1;
+  const params = data.params || {};
+
+  const typeOptions = (EVALUATOR_TYPES[taskType] || EVALUATOR_TYPES['classification'])
+    .map(o => `<option value="${o}"${o === evType ? ' selected' : ''}>${o}</option>`)
+    .join('');
+
+  const paramRowsHTML = Object.entries(params).map(([k, v]) =>
+    `<div class="param-row">
+      <input type="text" class="param-key" placeholder="key" value="${esc(String(k))}">
+      <input type="text" class="param-value" placeholder="value" value="${esc(String(v))}">
+      <button class="btn-remove-param" onclick="this.closest('.param-row').remove()" title="Remove param">✕</button>
+    </div>`
+  ).join('');
+
+  const div = document.createElement('div');
+  div.className = 'item-card';
+  div.dataset.evaluatorIndex = idx;
+  div.innerHTML = `
+    <div class="form-row">
+      <label>Label</label>
+      <input type="text" class="ev-label" placeholder="e.g. LogReg-default" value="${esc(lbl)}">
+    </div>
+    <div class="form-row">
+      <label>Task Type</label>
+      <select class="ev-task-type" onchange="updateEvaluatorTypeOptions(this)">
+        <option value="classification"${taskType === 'classification' ? ' selected' : ''}>classification</option>
+        <option value="regression"${taskType === 'regression' ? ' selected' : ''}>regression</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Type</label>
+      <select class="ev-type">${typeOptions}</select>
+    </div>
+    <div class="form-row">
+      <label>eval_every_k</label>
+      <input type="number" class="ev-eval-every-k" value="${evalEveryK}" min="1" step="1">
+    </div>
+    <div class="ev-params-section">
+      <label>Parameters</label>
+      <div class="ev-params-list">${paramRowsHTML}</div>
+      <button class="add-btn" onclick="addEvaluatorParam(this)">＋ Add Param</button>
+    </div>
+    <button class="btn-danger" onclick="removeEvaluatorCard(this)">✕ Remove</button>
+  `;
+  document.getElementById('evaluators-list').appendChild(div);
+}
+
+function addEvaluatorParam(btn) {
+  const list = btn.closest('.ev-params-section').querySelector('.ev-params-list');
+  const row = document.createElement('div');
+  row.className = 'param-row';
+  row.innerHTML = `
+    <input type="text" class="param-key" placeholder="key">
+    <input type="text" class="param-value" placeholder="value">
+    <button class="btn-remove-param" onclick="this.closest('.param-row').remove()" title="Remove param">✕</button>
+  `;
+  list.appendChild(row);
+}
+
+function removeEvaluatorCard(btn) {
+  btn.closest('.item-card').remove();
+}
+
+// ══════════════════════════════════════════════════════════════
+// TARGETS
+// ══════════════════════════════════════════════════════════════
+function addTarget(name, taskType) {
+  targetCounter++;
+  const id = targetCounter;
+  const div = document.createElement('div');
+  div.className = 'array-item';
+  div.dataset.targetId = id;
+  div.innerHTML = `
+    <button class="remove-btn" onclick="removeTarget(this)" title="Remove target">&#10005; Remove</button>
+    <div class="form-row">
+      <label>name</label>
+      <input type="text" class="target-name" data-tid="${id}" value="${esc(name || '')}" oninput="onTargetNameChange()">
+    </div>
+    <div class="form-row">
+      <label>task_type</label>
+      <select class="target-task" data-tid="${id}">
+        <option value="classification"${(taskType||'classification')==='classification'?' selected':''}>classification</option>
+        <option value="regression"${taskType==='regression'?' selected':''}>regression</option>
+      </select>
+    </div>`;
+  document.getElementById('targets-list').appendChild(div);
+  onTargetNameChange();
+}
+
+function removeTarget(btn) {
+  const list = document.getElementById('targets-list');
+  if (list.children.length <= 1) { alert('At least one target is required.'); return; }
+  if (!confirm('Remove this target?')) return;
+  btn.closest('.array-item').remove();
+  onTargetNameChange();
+}
+
+function getTargetNames() {
+  return Array.from(document.querySelectorAll('.target-name')).map(i => i.value.trim()).filter(Boolean);
+}
+
+function onTargetNameChange() {
+  refreshSelectorTargets();
+  refreshComparisonTargets();
+}
+
+// ══════════════════════════════════════════════════════════════
+// SELECTORS
+// ══════════════════════════════════════════════════════════════
+const MRMR_RELEVANCE = ['pearson','kendall','spearman','mutual_information','random_forest','f_statistic'];
+const MRMR_SCORE = ['difference','ratio'];
+const MRMR_REDUNDANCY = ['pearson','kendall','spearman'];
+const MRMR_AGG = ['mean','max'];
+
+function selectorParamsHTML(sid, type, params) {
+  params = params || {};
+  if (type === 'mrmr') {
+    return `
+      <div class="params-section" id="params-${sid}">
+        <div class="params-title">mRmR Parameters</div>
+        <div class="form-row">
+          <label>relevance_method</label>
+          <select data-sp="${sid}" data-key="relevance_method">
+            ${MRMR_RELEVANCE.map(v => `<option value="${v}"${(params.relevance_method||'pearson')===v?' selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>mrmr_score_method</label>
+          <select data-sp="${sid}" data-key="mrmr_score_method">
+            ${MRMR_SCORE.map(v => `<option value="${v}"${(params.mrmr_score_method||'difference')===v?' selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>redundancy_method</label>
+          <select data-sp="${sid}" data-key="redundancy_method">
+            ${MRMR_REDUNDANCY.map(v => `<option value="${v}"${(params.redundancy_method||'pearson')===v?' selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>redundancy_agg</label>
+          <select data-sp="${sid}" data-key="redundancy_agg">
+            ${MRMR_AGG.map(v => `<option value="${v}"${(params.redundancy_agg||'mean')===v?' selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>n_features_to_select</label>
+          <input type="number" data-sp="${sid}" data-key="n_features_to_select" value="${params.n_features_to_select ?? 30}" min="1" step="1">
+        </div>
+        <div class="form-row">
+          <label>eval_every_k</label>
+          <input type="number" data-sp="${sid}" data-key="eval_every_k" value="${params.eval_every_k ?? 2}" min="1" step="1">
+        </div>
+        <div class="form-row">
+          <label>correlation_filepath</label>
+          <div class="nullable-wrap">
+            <input type="text" id="sp-${sid}-correlation_filepath" data-sp="${sid}" data-key="correlation_filepath" value="${params.correlation_filepath||''}" ${params.correlation_filepath==null?'disabled':''}>
+            <span class="null-toggle">
+              <input type="checkbox" ${params.correlation_filepath==null?'checked':''} onchange="toggleNull('sp-${sid}-correlation_filepath', this.checked)"> null
+            </span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>relevance_scores_filepath</label>
+          <div class="nullable-wrap">
+            <input type="text" id="sp-${sid}-relevance_scores_filepath" data-sp="${sid}" data-key="relevance_scores_filepath" value="${params.relevance_scores_filepath||''}" ${params.relevance_scores_filepath==null?'disabled':''}>
+            <span class="null-toggle">
+              <input type="checkbox" ${params.relevance_scores_filepath==null?'checked':''} onchange="toggleNull('sp-${sid}-relevance_scores_filepath', this.checked)"> null
+            </span>
+          </div>
+        </div>
+      </div>`;
+  } else {
+    return `
+      <div class="params-section" id="params-${sid}">
+        <div class="params-title">Wrapper Parameters</div>
+        <div class="form-row">
+          <label>use_su_ranking</label>
+          <div class="checkbox-wrap">
+            <input type="checkbox" data-sp="${sid}" data-key="use_su_ranking" ${params.use_su_ranking!==false?'checked':''}>
+            <span style="font-size:.82rem;color:#667085">enabled</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>use_mb_pruning</label>
+          <div class="checkbox-wrap">
+            <input type="checkbox" data-sp="${sid}" data-key="use_mb_pruning" ${params.use_mb_pruning!==false?'checked':''}>
+            <span style="font-size:.82rem;color:#667085">enabled</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>mb_threshold</label>
+          <input type="number" data-sp="${sid}" data-key="mb_threshold" value="${params.mb_threshold ?? 0.01}" step="0.001">
+        </div>
+        <div class="form-row">
+          <label>cv_folds</label>
+          <input type="number" data-sp="${sid}" data-key="cv_folds" value="${params.cv_folds ?? 5}" min="2" step="1">
+        </div>
+        <div class="form-row">
+          <label>cv_min_folds</label>
+          <input type="number" data-sp="${sid}" data-key="cv_min_folds" value="${params.cv_min_folds ?? 3}" min="1" step="1">
+        </div>
+        <div class="form-row">
+          <label>patience</label>
+          <div class="nullable-wrap">
+            <input type="number" id="sp-${sid}-patience" data-sp="${sid}" data-key="patience" value="${params.patience!=null?params.patience:''}" min="1" step="1" ${params.patience==null?'disabled':''}>
+            <span class="null-toggle">
+              <input type="checkbox" ${params.patience==null?'checked':''} onchange="toggleNull('sp-${sid}-patience', this.checked)"> null
+            </span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>su_filepath</label>
+          <div class="nullable-wrap">
+            <input type="text" id="sp-${sid}-su_filepath" data-sp="${sid}" data-key="su_filepath" value="${params.su_filepath||''}" ${params.su_filepath==null?'disabled':''}>
+            <span class="null-toggle">
+              <input type="checkbox" ${params.su_filepath==null?'checked':''} onchange="toggleNull('sp-${sid}-su_filepath', this.checked)"> null
+            </span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>n_features_to_select</label>
+          <input type="number" data-sp="${sid}" data-key="n_features_to_select" value="${params.n_features_to_select ?? 20}" min="1" step="1">
+        </div>
+        <div class="form-row">
+          <label>test_eval_every_k</label>
+          <input type="number" data-sp="${sid}" data-key="test_eval_every_k" value="${params.test_eval_every_k ?? 2}" min="1" step="1">
+        </div>
+      </div>`;
+  }
+}
+
+function addSelector(data) {
+  selectorCounter++;
+  const sid = selectorCounter;
+  data = data || {};
+  const lbl = data.label || '';
+  const type = data.type || 'mrmr';
+  const enabled = data.enabled !== false;
+  const params = data.params || {};
+  const selTargets = data.targets || [];
+
+  const div = document.createElement('div');
+  div.className = 'array-item';
+  div.dataset.selectorId = sid;
+
+  const targetNames = getTargetNames();
+  const targetChecksHTML = targetNames.map(tn => {
+    const checked = selTargets.includes(tn) ? 'checked' : '';
+    return `<label><input type="checkbox" class="sel-target-cb" data-sid="${sid}" value="${esc(tn)}" ${checked}> ${esc(tn)}</label>`;
+  }).join('');
+
+  div.innerHTML = `
+    <button class="remove-btn" onclick="removeSelector(this)" title="Remove selector">&#10005; Remove</button>
+    <div class="form-row">
+      <label>label</label>
+      <input type="text" class="selector-label" data-sid="${sid}" value="${esc(lbl)}" oninput="onSelectorLabelChange()">
+    </div>
+    <div class="form-row">
+      <label>type</label>
+      <select class="selector-type" data-sid="${sid}" onchange="onSelectorTypeChange(${sid})">
+        <option value="mrmr"${type==='mrmr'?' selected':''}>mrmr</option>
+        <option value="wrapper"${type==='wrapper'?' selected':''}>wrapper</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>enabled</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" class="selector-enabled" data-sid="${sid}" ${enabled?'checked':''}>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>targets</label>
+      <div class="target-checks" data-sid="${sid}">${targetChecksHTML || '<span style="font-size:.82rem;color:#98a2b3;">No targets defined</span>'}</div>
+    </div>
+    ${selectorParamsHTML(sid, type, params)}
+  `;
+  document.getElementById('selectors-list').appendChild(div);
+  onSelectorLabelChange();
+}
+
+function removeSelector(btn) {
+  if (!confirm('Remove this selector?')) return;
+  btn.closest('.array-item').remove();
+  onSelectorLabelChange();
+}
+
+function onSelectorTypeChange(sid) {
+  const item = document.querySelector(`.array-item[data-selector-id="${sid}"]`);
+  const type = item.querySelector('.selector-type').value;
+  const oldParams = document.getElementById('params-' + sid);
+  if (oldParams) oldParams.remove();
+  item.insertAdjacentHTML('beforeend', selectorParamsHTML(sid, type, {}));
+}
+
+function getSelectorLabels() {
+  return Array.from(document.querySelectorAll('.selector-label')).map(i => i.value.trim()).filter(Boolean);
+}
+
+function onSelectorLabelChange() {
+  refreshComparisonSelectors();
+}
+
+// ── Refresh target checkboxes inside selectors ───────────────
+function refreshSelectorTargets() {
+  const names = getTargetNames();
+  document.querySelectorAll('.target-checks[data-sid]').forEach(container => {
+    const sid = container.dataset.sid;
+    const currentChecked = new Set(
+      Array.from(container.querySelectorAll('input:checked')).map(i => i.value)
+    );
+    container.innerHTML = names.length ? names.map(tn => {
+      const checked = currentChecked.has(tn) ? 'checked' : '';
+      return `<label><input type="checkbox" class="sel-target-cb" data-sid="${sid}" value="${esc(tn)}" ${checked}> ${esc(tn)}</label>`;
+    }).join('') : '<span style="font-size:.82rem;color:#98a2b3;">No targets defined</span>';
+  });
+}
+
+// ── Refresh target & selector refs in comparisons ────────────
+function refreshComparisonTargets() {
+  const names = getTargetNames();
+  document.querySelectorAll('.comp-target-select').forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = names.map(n => `<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+  });
+}
+
+function refreshComparisonSelectors() {
+  const labels = getSelectorLabels();
+  document.querySelectorAll('.selector-checks[data-cid]').forEach(container => {
+    const cid = container.dataset.cid;
+    const currentChecked = new Set(
+      Array.from(container.querySelectorAll('input:checked')).map(i => i.value)
+    );
+    container.innerHTML = labels.length ? labels.map(l => {
+      const checked = currentChecked.has(l) ? 'checked' : '';
+      return `<label><input type="checkbox" class="comp-sel-cb" data-cid="${cid}" value="${esc(l)}" ${checked}> ${esc(l)}</label>`;
+    }).join('') : '<span style="font-size:.82rem;color:#98a2b3;">No selectors defined</span>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// COMPARISONS
+// ══════════════════════════════════════════════════════════════
+function addComparison(data) {
+  comparisonCounter++;
+  const cid = comparisonCounter;
+  data = data || {};
+  const lbl = data.label || '';
+  const target = data.target || '';
+  const sels = data.selectors || [];
+  const inclBl = data.include_baseline !== false;
+  const ctype = data.type || 'compare_results';
+
+  const targetNames = getTargetNames();
+  const selLabels = getSelectorLabels();
+
+  const div = document.createElement('div');
+  div.className = 'array-item';
+  div.dataset.comparisonId = cid;
+
+  const targetOptionsHTML = targetNames.map(n =>
+    `<option value="${esc(n)}"${n===target?' selected':''}>${esc(n)}</option>`
+  ).join('');
+
+  const selChecksHTML = selLabels.length ? selLabels.map(l => {
+    const checked = sels.includes(l) ? 'checked' : '';
+    return `<label><input type="checkbox" class="comp-sel-cb" data-cid="${cid}" value="${esc(l)}" ${checked}> ${esc(l)}</label>`;
+  }).join('') : '<span style="font-size:.82rem;color:#98a2b3;">No selectors defined</span>';
+
+  div.innerHTML = `
+    <button class="remove-btn" onclick="removeComparison(this)" title="Remove comparison">&#10005; Remove</button>
+    <div class="form-row">
+      <label>label</label>
+      <input type="text" class="comp-label" data-cid="${cid}" value="${esc(lbl)}">
+    </div>
+    <div class="form-row">
+      <label>target</label>
+      <select class="comp-target-select" data-cid="${cid}">${targetOptionsHTML}</select>
+    </div>
+    <div class="form-row">
+      <label>selectors</label>
+      <div class="selector-checks" data-cid="${cid}">${selChecksHTML}</div>
+    </div>
+    <div class="form-row">
+      <label>include_baseline</label>
+      <div class="checkbox-wrap">
+        <input type="checkbox" class="comp-incl-bl" data-cid="${cid}" ${inclBl?'checked':''}>
+        <span style="font-size:.82rem;color:#667085">enabled</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>type</label>
+      <select class="comp-type" data-cid="${cid}">
+        <option value="compare_results"${ctype==='compare_results'?' selected':''}>compare_results</option>
+        <option value="compare_with"${ctype==='compare_with'?' selected':''}>compare_with</option>
+        <option value="summary_report"${ctype==='summary_report'?' selected':''}>summary_report</option>
+      </select>
+    </div>`;
+  document.getElementById('comparisons-list').appendChild(div);
+}
+
+function removeComparison(btn) {
+  if (!confirm('Remove this comparison?')) return;
+  btn.closest('.array-item').remove();
+}
+
+// ══════════════════════════════════════════════════════════════
+// COLLECT JSON FROM FORM
+// ══════════════════════════════════════════════════════════════
+function collectJSON() {
+  const cfg = {};
+
+  // Data
+  cfg.data = {
+    features_path: val('data-features_path'),
+    labels_path: val('data-labels_path'),
+    sample_id_column: val('data-sample_id_column'),
+    auto_transpose: ck('data-auto_transpose'),
+    fillna_value: numVal('data-fillna_value')
+  };
+
+  // Preprocessing
+  cfg.preprocessing = {
+    random_seed: intVal('pre-random_seed'),
+    train_pct: numVal('pre-train_pct'),
+    val_pct: numVal('pre-val_pct'),
+    test_pct: numVal('pre-test_pct'),
+    eval_data_source: val('pre-eval_data_source')
+  };
+
+  // Targets
+  cfg.targets = [];
+  document.querySelectorAll('#targets-list .array-item').forEach(item => {
+    cfg.targets.push({
+      name: item.querySelector('.target-name').value.trim(),
+      task_type: item.querySelector('.target-task').value
+    });
+  });
+
+  // Baseline
+  const blMode = document.querySelector('input[name="bl-eval-mode"]:checked').value;
+  let evalFc = 'from_selectors';
+  if (blMode === 'custom') {
+    const raw = val('bl-custom-counts').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+    evalFc = raw;
+  }
+  cfg.baseline = {
+    enabled: ck('bl-enabled'),
+    num_runs: intVal('bl-num_runs'),
+    eval_feature_counts: evalFc
+  };
+
+  // Selectors
+  cfg.selectors = [];
+  document.querySelectorAll('#selectors-list .array-item').forEach(item => {
+    const sid = item.dataset.selectorId;
+    const type = item.querySelector('.selector-type').value;
+    const params = {};
+
+    item.querySelectorAll('[data-sp="' + sid + '"]').forEach(el => {
+      const key = el.dataset.key;
+      if (el.type === 'checkbox' && !el.classList.contains('sel-target-cb')) {
+        // check if this is a null toggle
+        if (el.closest('.null-toggle')) return;
+        params[key] = el.checked;
+      } else if (el.type === 'number') {
+        if (el.disabled) { params[key] = null; }
+        else { params[key] = el.value === '' ? null : parseFloat(el.value); }
+      } else if (el.type === 'text') {
+        if (el.disabled) { params[key] = null; }
+        else { params[key] = el.value || null; }
+      } else if (el.tagName === 'SELECT') {
+        params[key] = el.value;
+      }
+    });
+
+    const targets = Array.from(item.querySelectorAll('.sel-target-cb:checked')).map(i => i.value);
+
+    cfg.selectors.push({
+      label: item.querySelector('.selector-label').value.trim(),
+      type: type,
+      enabled: item.querySelector('.selector-enabled').checked,
+      params: params,
+      targets: targets
+    });
+  });
+
+  // Evaluators
+  cfg.evaluators = Array.from(document.querySelectorAll('#evaluators-list .item-card')).map(card => {
+    const params = {};
+    card.querySelectorAll('.ev-params-list .param-row').forEach(row => {
+      const k = row.querySelector('.param-key').value.trim();
+      const v = row.querySelector('.param-value').value.trim();
+      if (k) params[k] = isNaN(v) || v === '' ? v : Number(v);
+    });
+    return {
+      label: card.querySelector('.ev-label').value.trim(),
+      type: card.querySelector('.ev-type').value,
+      task_type: card.querySelector('.ev-task-type').value,
+      eval_every_k: parseInt(card.querySelector('.ev-eval-every-k').value, 10) || 1,
+      params,
+    };
+  });
+
+  // Comparisons
+  cfg.comparisons = [];
+  document.querySelectorAll('#comparisons-list .array-item').forEach(item => {
+    const cid = item.dataset.comparisonId;
+    const sels = Array.from(item.querySelectorAll('.comp-sel-cb:checked')).map(i => i.value);
+    cfg.comparisons.push({
+      label: item.querySelector('.comp-label').value.trim(),
+      target: item.querySelector('.comp-target-select').value,
+      selectors: sels,
+      include_baseline: item.querySelector('.comp-incl-bl').checked,
+      type: item.querySelector('.comp-type').value
+    });
+  });
+
+  // Score matrix
+  cfg.score_matrix = {
+    random_forest: {
+      n_estimators: intVal('sm-rf-n_estimators'),
+      max_depth: document.getElementById('sm-rf-max_depth-null').checked ? null : intVal('sm-rf-max_depth')
+    },
+    mutual_information: {
+      n_neighbors: intVal('sm-mi-n_neighbors')
+    }
+  };
+
+  // Output
+  cfg.output = {
+    base_dir: val('out-base_dir'),
+    save_results_json: ck('out-save_results_json'),
+    generate_dashboard: ck('out-generate_dashboard'),
+    fetch_past_results: ck('out-fetch_past_results')
+  };
+
+  return cfg;
+}
+
+// helpers
+function val(id) { return document.getElementById(id).value; }
+function ck(id) { return document.getElementById(id).checked; }
+function numVal(id) { const v = document.getElementById(id).value; return v === '' ? 0 : parseFloat(v); }
+function intVal(id) { const v = document.getElementById(id).value; return v === '' ? 0 : parseInt(v, 10); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ══════════════════════════════════════════════════════════════
+// LOAD JSON INTO FORM
+// ══════════════════════════════════════════════════════════════
+function loadJSON(cfg) {
+  // Data
+  if (cfg.data) {
+    setVal('data-features_path', cfg.data.features_path);
+    setVal('data-labels_path', cfg.data.labels_path);
+    setVal('data-sample_id_column', cfg.data.sample_id_column);
+    setCk('data-auto_transpose', cfg.data.auto_transpose);
+    setVal('data-fillna_value', cfg.data.fillna_value);
+  }
+
+  // Preprocessing
+  if (cfg.preprocessing) {
+    setVal('pre-random_seed', cfg.preprocessing.random_seed);
+    setVal('pre-train_pct', cfg.preprocessing.train_pct);
+    setVal('pre-val_pct', cfg.preprocessing.val_pct);
+    setVal('pre-test_pct', cfg.preprocessing.test_pct);
+    if (cfg.preprocessing.eval_data_source) setVal('pre-eval_data_source', cfg.preprocessing.eval_data_source);
+    checkPctSum();
+  }
+
+  // Targets
+  document.getElementById('targets-list').innerHTML = '';
+  targetCounter = 0;
+  if (cfg.targets && cfg.targets.length) {
+    cfg.targets.forEach(t => addTarget(t.name, t.task_type));
+  } else {
+    addTarget('target_name', 'classification');
+  }
+
+  // Baseline
+  if (cfg.baseline) {
+    setCk('bl-enabled', cfg.baseline.enabled);
+    setVal('bl-num_runs', cfg.baseline.num_runs);
+    if (Array.isArray(cfg.baseline.eval_feature_counts)) {
+      document.querySelector('input[name="bl-eval-mode"][value="custom"]').checked = true;
+      setVal('bl-custom-counts', cfg.baseline.eval_feature_counts.join(', '));
+      toggleBaselineCustom();
+    } else {
+      document.querySelector('input[name="bl-eval-mode"][value="from_selectors"]').checked = true;
+      toggleBaselineCustom();
+    }
+  }
+
+  // Evaluators
+  document.getElementById('evaluators-list').innerHTML = '';
+  evaluatorCounter = 0;
+  if (cfg.evaluators && cfg.evaluators.length) {
+    cfg.evaluators.forEach(ev => addEvaluatorCard(ev));
+  }
+
+  // Selectors
+  document.getElementById('selectors-list').innerHTML = '';
+  selectorCounter = 0;
+  if (cfg.selectors && cfg.selectors.length) {
+    cfg.selectors.forEach(s => addSelector(s));
+  }
+
+  // Comparisons
+  document.getElementById('comparisons-list').innerHTML = '';
+  comparisonCounter = 0;
+  if (cfg.comparisons && cfg.comparisons.length) {
+    cfg.comparisons.forEach(c => addComparison(c));
+  }
+
+  // Score matrix
+  if (cfg.score_matrix) {
+    if (cfg.score_matrix.random_forest) {
+      setVal('sm-rf-n_estimators', cfg.score_matrix.random_forest.n_estimators);
+      if (cfg.score_matrix.random_forest.max_depth == null) {
+        document.getElementById('sm-rf-max_depth-null').checked = true;
+        toggleNull('sm-rf-max_depth', true);
+      } else {
+        document.getElementById('sm-rf-max_depth-null').checked = false;
+        toggleNull('sm-rf-max_depth', false);
+        setVal('sm-rf-max_depth', cfg.score_matrix.random_forest.max_depth);
+      }
+    }
+    if (cfg.score_matrix.mutual_information) {
+      setVal('sm-mi-n_neighbors', cfg.score_matrix.mutual_information.n_neighbors);
+    }
+  }
+
+  // Output
+  if (cfg.output) {
+    setVal('out-base_dir', cfg.output.base_dir);
+    setCk('out-save_results_json', cfg.output.save_results_json);
+    setCk('out-generate_dashboard', cfg.output.generate_dashboard);
+    setCk('out-fetch_past_results', cfg.output.fetch_past_results ?? false);
+  }
+}
+
+function setVal(id, v) { const el = document.getElementById(id); if (el && v != null) el.value = v; }
+function setCk(id, v) { const el = document.getElementById(id); if (el) el.checked = !!v; }
+
+// ══════════════════════════════════════════════════════════════
+// VALIDATION
+// ══════════════════════════════════════════════════════════════
+function validateAll() {
+  const errors = [];
+  const cfg = collectJSON();
+
+  // At least one target
+  if (!cfg.targets.length) errors.push('At least one target is required.');
+  cfg.targets.forEach((t, i) => { if (!t.name) errors.push(`Target #${i+1} has an empty name.`); });
+
+  // Pct sum
+  const pctSum = cfg.preprocessing.train_pct + cfg.preprocessing.val_pct + cfg.preprocessing.test_pct;
+  if (Math.abs(pctSum - 1.0) > 0.011) errors.push(`Preprocessing percentages sum to ${pctSum.toFixed(4)} (should be 1.0 ± 0.01).`);
+
+  // At least one enabled selector
+  if (!cfg.selectors.some(s => s.enabled)) errors.push('At least one selector must be enabled.');
+
+  // Selector labels non-empty & unique
+  const selLabels = new Set();
+  cfg.selectors.forEach((s, i) => {
+    if (!s.label) errors.push(`Selector #${i+1} has an empty label.`);
+    if (selLabels.has(s.label)) errors.push(`Duplicate selector label: "${s.label}".`);
+    selLabels.add(s.label);
+    if (!s.targets.length) errors.push(`Selector "${s.label || '#'+(i+1)}" has no targets selected.`);
+  });
+
+  // Comparisons
+  const definedTargets = new Set(cfg.targets.map(t => t.name));
+  const definedSelectors = new Set(cfg.selectors.map(s => s.label));
+  cfg.comparisons.forEach((c, i) => {
+    if (!c.label) errors.push(`Comparison #${i+1} has an empty label.`);
+    if (c.target && !definedTargets.has(c.target)) errors.push(`Comparison "${c.label || '#'+(i+1)}" references undefined target "${c.target}".`);
+    c.selectors.forEach(sl => {
+      if (!definedSelectors.has(sl)) errors.push(`Comparison "${c.label || '#'+(i+1)}" references undefined selector "${sl}".`);
+    });
+  });
+
+  const msgEl = document.getElementById('validationMsg');
+  if (errors.length) {
+    msgEl.className = 'validation-msg error';
+    msgEl.innerHTML = '<strong>Validation Errors:</strong><ul>' + errors.map(e => '<li>' + esc(e) + '</li>').join('') + '</ul>';
+  } else {
+    msgEl.className = 'validation-msg success';
+    msgEl.innerHTML = '&#10003; Configuration is valid!';
+    setTimeout(() => { msgEl.className = 'validation-msg'; }, 4000);
+  }
+  msgEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return errors.length === 0;
+}
+
+// ══════════════════════════════════════════════════════════════
+// DOWNLOAD JSON
+// ══════════════════════════════════════════════════════════════
+function downloadJSON() {
+  const cfg = collectJSON();
+  const json = JSON.stringify(cfg, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pipeline_config.json';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ══════════════════════════════════════════════════════════════
+// UPLOAD JSON
+// ══════════════════════════════════════════════════════════════
+document.getElementById('uploadInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    try {
+      const cfg = JSON.parse(ev.target.result);
+      loadJSON(cfg);
+      showMsg('success', '&#10003; Config loaded from ' + esc(file.name));
+    } catch(err) {
+      showMsg('error', 'Failed to parse JSON: ' + esc(err.message));
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+// Drag and drop
+let dragCounter = 0;
+document.addEventListener('dragenter', function(e) {
+  e.preventDefault();
+  dragCounter++;
+  document.getElementById('dropOverlay').classList.add('active');
+});
+document.addEventListener('dragleave', function(e) {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    document.getElementById('dropOverlay').classList.remove('active');
+  }
+});
+document.addEventListener('dragover', function(e) { e.preventDefault(); });
+document.addEventListener('drop', function(e) {
+  e.preventDefault();
+  dragCounter = 0;
+  document.getElementById('dropOverlay').classList.remove('active');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    try {
+      const cfg = JSON.parse(ev.target.result);
+      loadJSON(cfg);
+      showMsg('success', '&#10003; Config loaded from ' + esc(file.name));
+    } catch(err) {
+      showMsg('error', 'Failed to parse JSON: ' + esc(err.message));
+    }
+  };
+  reader.readAsText(file);
+});
+
+function showMsg(type, html) {
+  const msgEl = document.getElementById('validationMsg');
+  msgEl.className = 'validation-msg ' + type;
+  msgEl.innerHTML = html;
+  if (type === 'success') setTimeout(() => { msgEl.className = 'validation-msg'; }, 4000);
+}
+
+// ══════════════════════════════════════════════════════════════
+// RESET TO DEFAULTS
+// ══════════════════════════════════════════════════════════════
+function resetToDefaults() {
+  if (!confirm('Reset all fields to defaults?')) return;
+  loadJSON(DEFAULT_CONFIG);
+  showMsg('success', '&#8635; Reset to defaults.');
+}
+
+const DEFAULT_CONFIG = {
+  data: {
+    features_path: "./data/features.csv",
+    labels_path: "./data/labels.csv",
+    sample_id_column: "samplename",
+    auto_transpose: true,
+    fillna_value: 0
+  },
+  preprocessing: {
+    random_seed: 2,
+    train_pct: 0.7,
+    val_pct: 0.1,
+    test_pct: 0.2,
+    eval_data_source: "validation"
+  },
+  targets: [
+    { name: "target_name", task_type: "classification" }
+  ],
+  baseline: {
+    enabled: true,
+    num_runs: 10,
+    eval_feature_counts: "from_selectors"
+  },
+  selectors: [
+    {
+      label: "mRmR-Pearson",
+      type: "mrmr",
+      enabled: true,
+      params: {
+        relevance_method: "pearson",
+        mrmr_score_method: "difference",
+        redundancy_method: "pearson",
+        redundancy_agg: "mean",
+        n_features_to_select: 30,
+        eval_every_k: 2,
+        correlation_filepath: null,
+        relevance_scores_filepath: null
+      },
+      targets: ["target_name"]
+    },
+    {
+      label: "IWSS-MB",
+      type: "wrapper",
+      enabled: true,
+      params: {
+        use_su_ranking: true,
+        use_mb_pruning: true,
+        mb_threshold: 0.01,
+        cv_folds: 5,
+        cv_min_folds: 3,
+        patience: null,
+        su_filepath: null,
+        n_features_to_select: 20,
+        test_eval_every_k: 2
+      },
+      targets: ["target_name"]
+    }
+  ],
+  evaluators: [
+    {
+      label: "LogReg-default",
+      type: "logistic_regression",
+      task_type: "classification",
+      eval_every_k: 1,
+      params: {}
+    }
+  ],
+  comparisons: [],
+  score_matrix: {
+    random_forest: { n_estimators: 100, max_depth: null },
+    mutual_information: { n_neighbors: 3 }
+  },
+  output: {
+    base_dir: "./output",
+    save_results_json: true,
+    generate_dashboard: true,
+    fetch_past_results: false
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+// INIT — load defaults
+// ══════════════════════════════════════════════════════════════
+loadJSON(DEFAULT_CONFIG);
+</script>
+</body>
+</html>

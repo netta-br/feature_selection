@@ -1,0 +1,159 @@
+{
+  "data": {
+    "features_path": "./data/SCANB.csv",
+    "labels_path": "./data/sampleinfo_SCANB_t.csv",
+    "sample_id_column": "samplename",
+    "auto_transpose": true,
+    "fillna_value": 0
+  },
+  "preprocessing": {
+    "random_seed": 2,
+    "train_pct": 0.7,
+    "val_pct": 0.1,
+    "test_pct": 0.2
+  },
+  "targets": [
+    {
+      "name": "is_lumA",
+      "task_type": "classification"
+    },
+    {
+      "name": "Lympho",
+      "task_type": "regression"
+    }
+  ],
+  "baseline": {
+    "enabled": true,
+    "num_runs": 10,
+    "eval_feature_counts": "from_selectors"
+  },
+  "selectors": [
+    {
+      "label": "mRmR-Pearson",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "pearson",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": ["is_lumA", "Lympho"]
+    },
+    {
+      "label": "mRmR-MI",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "mutual_information",
+        "mrmr_score_method": "ratio",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": ["is_lumA"]
+    },
+    {
+      "label": "mRmR-RF",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "random_forest",
+        "mrmr_score_method": "ratio",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": ["is_lumA"]
+    },
+    {
+      "label": "mRmR-FS",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "f_statistic",
+        "mrmr_score_method": "ratio",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": ["is_lumA"]
+    },
+    {
+      "label": "IWSS-MB",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0.01,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 20,
+        "test_eval_every_k": 2
+      },
+      "targets": ["is_lumA", "Lympho"]
+    },
+    {
+      "label": "IWSS",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": false,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "su_filepath": null,
+        "n_features_to_select": 20,
+        "test_eval_every_k": 2
+      },
+      "targets": ["is_lumA"]
+    }
+  ],
+  "comparisons": [
+    {
+      "label": "All classification selectors",
+      "target": "is_lumA",
+      "selectors": ["mRmR-Pearson", "mRmR-MI", "mRmR-RF", "mRmR-FS", "IWSS-MB", "IWSS"],
+      "include_baseline": true,
+      "type": "compare_results"
+    },
+    {
+      "label": "mRmR Pearson vs MI feature diff",
+      "target": "is_lumA",
+      "selectors": ["mRmR-Pearson", "mRmR-MI"],
+      "type": "compare_with"
+    },
+    {
+      "label": "All selectors feature summary",
+      "target": "is_lumA",
+      "selectors": ["mRmR-Pearson", "mRmR-MI", "mRmR-RF", "IWSS-MB"],
+      "type": "summary_report"
+    }
+  ],
+  "score_matrix": {
+    "random_forest": {
+      "n_estimators": 100,
+      "max_depth": null
+    },
+    "mutual_information": {
+      "n_neighbors": 3
+    }
+  },
+  "output": {
+    "base_dir": "./output",
+    "save_results_json": true,
+    "generate_dashboard": true
+  }
+}

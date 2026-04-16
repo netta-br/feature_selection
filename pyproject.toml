@@ -1,0 +1,28 @@
+[project]
+name = "feature-selection"
+version = "0.1.0"
+description = "Configurable feature selection pipeline with mRmR filter and IWSS/SFS wrapper methods"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bokeh>=3.3",
+    "hvplot>=0.9",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "panel>=1.8.10",
+    "pyarrow>=23.0.1",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.15.3",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+]
+
+[project.scripts]
+feature-selection = "main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
