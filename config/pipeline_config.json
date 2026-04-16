@@ -1,0 +1,422 @@
+{
+  "data": {
+    "features_path": "feature_selection/data/SCANB.csv",
+    "labels_path": "feature_selection/data/sampleinfo_SCANB_t.csv",
+    "sample_id_column": "samplename",
+    "auto_transpose": true,
+    "fillna_value": 0
+  },
+  "preprocessing": {
+    "random_seed": 2,
+    "train_pct": 0.7,
+    "val_pct": 0,
+    "test_pct": 0.3,
+    "eval_data_source": "test"
+  },
+  "targets": [
+    {
+      "name": "Lympho",
+      "task_type": "regression"
+    },
+    {
+      "name": "is_lumA",
+      "task_type": "classification"
+    }
+  ],
+  "baseline": {
+    "enabled": true,
+    "num_runs": 10,
+    "eval_feature_counts": "from_selectors"
+  },
+  "selectors": [
+    {
+      "label": "mRmR-Pearson-mean",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "pearson",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-Pearson-max",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "pearson",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "max",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-Kendall",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "kendall",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "kendall",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-spearman",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "spearman",
+        "mrmr_score_method": "difference",
+        "redundancy_method": "spearman",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-MI",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "mutual_information",
+        "mrmr_score_method": "ratio",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-FS",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "f_statistic",
+        "mrmr_score_method": "ratio",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "mRmR-RF",
+      "type": "mrmr",
+      "enabled": true,
+      "params": {
+        "relevance_method": "random_forest",
+        "mrmr_score_method": "ratio",
+        "redundancy_method": "pearson",
+        "redundancy_agg": "mean",
+        "n_features_to_select": 30,
+        "eval_every_k": 2,
+        "correlation_filepath": null,
+        "relevance_scores_filepath": null
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "SFS",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": false,
+        "use_mb_pruning": false,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 10,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "SFS-MB",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": false,
+        "use_mb_pruning": true,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 10,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "IWSS",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": false,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 20,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "IWSS-MB",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 30,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "IWSS-MB-2minFold",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0,
+        "cv_folds": 5,
+        "cv_min_folds": 2,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 30,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    },
+    {
+      "label": "IWSS-MB-positive_mb_threshold",
+      "type": "wrapper",
+      "enabled": true,
+      "params": {
+        "use_su_ranking": true,
+        "use_mb_pruning": true,
+        "mb_threshold": 0.005,
+        "cv_folds": 5,
+        "cv_min_folds": 3,
+        "patience": null,
+        "su_filepath": null,
+        "n_features_to_select": 30,
+        "test_eval_every_k": 2
+      },
+      "targets": [
+        "Lympho",
+        "is_lumA"
+      ]
+    }
+  ],
+  "evaluators": [
+    {
+      "label": "k-NN (3)",
+      "type": "knn",
+      "task_type": "classification",
+      "eval_every_k": 1,
+      "params": {
+        "n_neighbors": 3
+      }
+    },
+    {
+      "label": "k-NN (5)",
+      "type": "knn",
+      "task_type": "classification",
+      "eval_every_k": 1,
+      "params": {
+        "n_neighbors": 5
+      }
+    },
+    {
+      "label": "NB",
+      "type": "naive_bayes",
+      "task_type": "classification",
+      "eval_every_k": 1,
+      "params": {}
+    }
+  ],
+  "comparisons": [
+    {
+      "label": "2 vs 3 Fold",
+      "target": "Lympho",
+      "selectors": [
+        "IWSS-MB",
+        "IWSS-MB-2minFold"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "Lympho - selectors - summary",
+      "target": "Lympho",
+      "selectors": [
+        "mRmR-Pearson-mean",
+        "mRmR-Pearson-max",
+        "mRmR-Kendall",
+        "mRmR-spearman",
+        "mRmR-MI",
+        "mRmR-FS",
+        "mRmR-RF",
+        "SFS",
+        "SFS-MB",
+        "IWSS",
+        "IWSS-MB",
+        "IWSS-MB-2minFold",
+        "IWSS-MB-positive_mb_threshold"
+      ],
+      "include_baseline": true,
+      "type": "summary_report"
+    },
+    {
+      "label": "Kendall vs. Pearson",
+      "target": "Lympho",
+      "selectors": [
+        "mRmR-Pearson-mean",
+        "mRmR-Kendall"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "Kendall vs. Spearman",
+      "target": "Lympho",
+      "selectors": [
+        "mRmR-Kendall",
+        "mRmR-spearman"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "reduce minFold vs. positive MB threshold",
+      "target": "Lympho",
+      "selectors": [
+        "IWSS-MB-2minFold",
+        "IWSS-MB-positive_mb_threshold"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "mean vs. max redundancy",
+      "target": "is_lumA",
+      "selectors": [
+        "mRmR-Pearson-mean",
+        "mRmR-Pearson-max"
+      ],
+      "include_baseline": true,
+      "type": "compare_with"
+    },
+    {
+      "label": "lumA - selectors - summary",
+      "target": "is_lumA",
+      "selectors": [
+        "mRmR-Pearson-mean",
+        "mRmR-Pearson-max",
+        "mRmR-Kendall",
+        "mRmR-spearman",
+        "mRmR-MI",
+        "mRmR-FS",
+        "mRmR-RF",
+        "SFS",
+        "SFS-MB",
+        "IWSS",
+        "IWSS-MB",
+        "IWSS-MB-2minFold",
+        "IWSS-MB-positive_mb_threshold"
+      ],
+      "include_baseline": true,
+      "type": "summary_report"
+    }
+  ],
+  "score_matrix": {
+    "random_forest": {
+      "n_estimators": 70,
+      "max_depth": null
+    },
+    "mutual_information": {
+      "n_neighbors": 3
+    }
+  },
+  "output": {
+    "base_dir": "./output",
+    "save_results_json": true,
+    "generate_dashboard": true,
+    "fetch_past_results": true
+  }
+}
