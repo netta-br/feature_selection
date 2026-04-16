@@ -118,10 +118,11 @@ class SelectionResult:
         if self.final_metrics is not None:
             if self.task_type == "classification":
                 acc = self.final_metrics.get("accuracy", "n/a")
-                f1 = (
+                f1 = self.final_metrics.get(
+                    "macro_f1",
                     self.final_metrics.get("macro avg", {}).get("f1-score", "n/a")
                     if isinstance(self.final_metrics.get("macro avg"), dict)
-                    else "n/a"
+                    else "n/a",
                 )
                 lines.append(f"  final accuracy    : {acc}")
                 lines.append(f"  final macro F1    : {f1}")
@@ -451,10 +452,11 @@ class SelectionResult:
             {
                 "n_features": entry["step"],
                 "accuracy":   entry.get("accuracy", float("nan")),
-                "macro_f1":   (
+                "macro_f1":   entry.get(
+                    "macro_f1",
                     entry.get("macro avg", {}).get("f1-score", float("nan"))
                     if isinstance(entry.get("macro avg"), dict)
-                    else float("nan")
+                    else float("nan"),
                 ),
             }
             for entry in self.performance_history
@@ -637,10 +639,11 @@ class SelectionResult:
                     {
                         "n_features": entry["step"],
                         "accuracy":   entry.get("accuracy", float("nan")),
-                        "macro_f1":   (
+                        "macro_f1":   entry.get(
+                            "macro_f1",
                             entry.get("macro avg", {}).get("f1-score", float("nan"))
                             if isinstance(entry.get("macro avg"), dict)
-                            else float("nan")
+                            else float("nan"),
                         ),
                     }
                     for entry in res.performance_history
